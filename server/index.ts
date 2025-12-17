@@ -64,6 +64,11 @@ export class SignalingDurableObject extends DurableObject {
 	sessions: WebSocket[] = [];
 
 	async fetch(request: Request): Promise<Response> {
+		let currentAlarm = await this.ctx.storage.getAlarm();
+		if (currentAlarm !== null) {
+			await this.ctx.storage.deleteAlarm();
+		}
+
 		// 创建 WebSocket 对
 		const [client, server] = Object.values(new WebSocketPair());
 
@@ -103,5 +108,15 @@ export class SignalingDurableObject extends DurableObject {
 				session.send(message);
 			}
 		}
+	}
+
+	async closeOrDisconnect() {
+		if (this.sessions.length === 0) {
+			await this.ctx.storage.setAlarm(Date.now() + 600 * 1000);
+		}
+	}
+
+	async alarm() {
+		await this.ctx.storage.deleteAll();
 	}
 }
