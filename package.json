@@ -17,6 +17,7 @@
 	},
 	"dependencies": {
 		"streamsaver": "^2.0.6",
+		"ua-parser-js": "^2.0.7",
 		"vue": "^3.5.25",
 		"vue-router": "^4.6.3",
 		"vue-turnstile": "^1.0.11"

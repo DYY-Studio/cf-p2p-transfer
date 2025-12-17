@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { UAParser } from 'ua-parser-js';
 
 export interface Env {
 	SIGNALING_DO: DurableObjectNamespace;
@@ -98,9 +99,18 @@ export default {
 	},
 };
 
+type SignalMessage = {
+  type: 'role' | 'join_request' | 'join_approve' | 'join_reject' | 'offer' | 'answer' | 'candidate';
+  [key: string]: any;
+};
+
 export class SignalingDurableObject extends DurableObject {
 	// 存储当前房间内的所有 WebSocket 连接
 	sessions: WebSocket[] = [];
+	hostSession: WebSocket | null = null;
+	approvedSessions: Set<WebSocket> = new Set();
+
+	uaParser: UAParser = new UAParser();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -115,7 +125,7 @@ export class SignalingDurableObject extends DurableObject {
 		// 创建 WebSocket 对
 		const [client, server] = Object.values(new WebSocketPair());
 
-		await this.handleSession(server);
+		await this.handleSession(server, request);
 
 		return new Response(null, {
 			status: 101,
@@ -123,17 +133,84 @@ export class SignalingDurableObject extends DurableObject {
 		});
 	}
 
-	async handleSession(webSocket: WebSocket) {
+	async handleSession(webSocket: WebSocket, request: Request) {
 		// 接受连接
 		webSocket.accept();
 		this.sessions.push(webSocket);
 
+		const isHost = this.hostSession === null || (this.hostSession && webSocket === this.hostSession);
+		if (isHost) {
+			this.hostSession = webSocket;
+			this.approvedSessions.add(webSocket);
+			const currAlarm = await this.ctx.storage.getAlarm();
+			if (currAlarm) { 
+				await this.ctx.storage.deleteAlarm();
+			}
+		}
+
+		webSocket.send(JSON.stringify({ 
+			type: 'role', 
+			role: isHost ? 'host' : 'guest' 
+		}));
+
+		const ua = request.headers.get('User-Agent') || 'unknown';
+		this.uaParser.setUA(ua)
+
+		const parseResult = this.uaParser.getResult();
+		const deviceName = `${parseResult.device.type??'unknown device'} (${parseResult.os.name??'unknown os'}, ${parseResult.browser.name??'unknown browser'})`;
+
 		// 监听消息
-		webSocket.addEventListener("message", async (msg) => {
+		webSocket.addEventListener("message", async (event) => {
 			try {
-				// 简单的广播逻辑：把收到的消息转发给房间里“除了自己以外”的所有人
-				// 在 P2P 握手阶段，这用于交换 SDP 和 ICE Candidate
-				this.broadcast(msg.data as string, webSocket);
+				const msg = JSON.parse(event.data as string) as SignalMessage;
+				// --- A. 处理敲门请求 (Guest -> Host) ---
+				if (msg.type === 'join_request') {
+				// 只有 Host 存在时才能申请
+					if (this.hostSession && this.hostSession.readyState === WebSocket.READY_STATE_OPEN) {
+						this.hostSession.send(JSON.stringify({
+							type: 'join_request',
+							deviceName: deviceName, // 告诉房主是谁在敲门
+							guestId: this.sessions.indexOf(webSocket) // 简单用索引做 ID，实际可用 UUID
+						}));
+					} else {
+						// 房主不在，直接拒绝或提示
+						webSocket.send(JSON.stringify({ type: 'error', message: 'Host not active' }));
+					}
+					return;
+				}
+
+				// --- B. 处理审批结果 (Host -> Guest) ---
+				if (msg.type === 'join_approve') {
+					if (webSocket !== this.hostSession) return; // 只有房主能审批
+
+					// 找到对应的 Guest
+					const guestIndex = msg.guestId;
+					const guestWs = this.sessions[guestIndex];
+
+					if (guestWs) {
+						this.approvedSessions.add(guestWs); // 加入白名单
+						// 通知 Guest：你进来了
+						guestWs.send(JSON.stringify({ type: 'join_approve' }));
+					}
+					return;
+				}
+
+				if (msg.type === 'join_reject') {
+					if (webSocket !== this.hostSession) return;
+					const guestWs = this.sessions[msg.guestId];
+					if (guestWs) {
+						guestWs.send(JSON.stringify({ type: 'join_reject' }));
+						guestWs.close(); // 拒绝后直接断开
+					}
+					return;
+				}
+
+				if (this.approvedSessions.has(webSocket)) {
+					this.broadcast(event.data as string, webSocket);
+				} else {
+				// 如果不在白名单却发 offer，说明是恶意连接或 Bug，忽略之
+					console.warn("Blocked unauthorized signal from guest");
+				}
 			} catch (err) {
 				console.error("Broadcast error", err);
 			}
@@ -141,50 +218,40 @@ export class SignalingDurableObject extends DurableObject {
 
 		// 监听关闭
 		webSocket.addEventListener("close", async () => {
-			this.sessions = this.sessions.filter((s) => s !== webSocket);
-			await this.scheduleCleanup();
+			await this.userLeft(webSocket);
 		});
 
 		webSocket.addEventListener("error", async () => {
-			this.sessions = this.sessions.filter((s) => s !== webSocket);
-			await this.scheduleCleanup();
+			await this.userLeft(webSocket);
 		});
 	}
 
-	async scheduleCleanup() {
-		// 过滤掉已经关闭的连接，确保计数准确
-		const activeSessions = this.sessions.filter(s => s.readyState === WebSocket.READY_STATE_OPEN);
-
-		// 如果房间空了
-		if (activeSessions.length === 0) {
-			// 设置一个 Alarm，10 分钟 (600秒) 后触发
-			// Date.now() 是毫秒，所以要 + 600 * 1000
-			const cleanupTime = Date.now() + 600 * 1000;
-			await this.ctx.storage.setAlarm(cleanupTime);
-			console.log(this.ctx.id, "房间已空，安排 10 分钟后销毁");
-		}
-	}
-
 	broadcast(message: string, sender: WebSocket) {
-		for (const session of this.sessions) {
-			if (session !== sender && session.readyState === WebSocket.READY_STATE_OPEN) {
+		this.sessions.forEach(session => {
+			if (session !== sender && 
+				session.readyState === WebSocket.READY_STATE_OPEN &&
+				this.approvedSessions.has(session) 
+			) {
 				session.send(message);
 			}
-		}
+		});
 	}
 
 	async alarm() {
-		const activeSessions = this.sessions.filter(s => s.readyState === WebSocket.READY_STATE_OPEN);
-		if (activeSessions.length > 0) {
-			// 居然还有人？那就不删了
-			return;
-		}
-
-		// 1. 清空所有持久化存储 (如果我们存了 metadata 或密码)
+		this.hostSession = null;
+		this.sessions.forEach(s => s.close(1000, "Host left"));
 		await this.ctx.storage.deleteAll();
+	}
 
-		// 2. 关闭所有残留的 WebSocket (理论上应该没了，但为了保险)
-		this.sessions.forEach(ws => ws.close(1000, "Room closed due to inactivity"));
-		this.sessions = [];
+	async userLeft(ws: WebSocket) {
+		this.sessions = this.sessions.filter(s => s !== ws);
+		this.approvedSessions.delete(ws);
+		
+		// 如果房主走了，房间重置 (或者你可以设计让下一个顺位成为房主)
+		if (ws === this.hostSession) {
+			await this.ctx.storage.setAlarm(Date.now() + 10);
+		} else if (this.sessions.length == 0) {
+			await this.alarm();
+		}
 	}
 }

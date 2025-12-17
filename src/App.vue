@@ -3,12 +3,20 @@ import { ref, onUnmounted } from 'vue';
 import streamSaver from 'streamsaver';
 import VueTurnstile from 'vue-turnstile'; 
 
+// --- Cloudflare 配置 ---
+const workerHost = 'file-sharing.yyfll.eu.org'; 
+
+// --- Turnstile 状态 ---
+const turnstileToken = ref('');
+const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
+
 // --- 状态变量 ---
 const roomId = ref('1234');
 const isConnected = ref(false); // WebSocket 连接状态
 const p2pStatus = ref('disconnected'); // P2P 连接状态
 const logs = ref<string[]>([]);
 const saverMethod = ref('StreamSaver');
+const inputFile = ref<File>();
 
 // --- 文件传输状态 ---
 const transferProgress = ref(0);
@@ -29,13 +37,14 @@ let fileWriter: WritableStreamDefaultWriter | null = null; //用于写入硬盘�
 let receivingMeta: { name: string; size: number; type: string } | null = null;
 let receivedBytes = 0;
 
+// --- 角色控制变量 ---
+const myRole = ref<'host' | 'guest' | ''>('');
+const isPendingApproval = ref(false); // Guest 是否在等
+const pendingGuest = ref<{ name: string; id: number } | null>(null);
+
 // --- 常量配置 ---
 const CHUNK_SIZE = 16 * 1024; // 16KB (WebRTC 推荐的安全分片大小)
 const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB (背压阈值，超过就暂停发送)
-
-// --- Turnstile 状态 ---
-const turnstileToken = ref('');
-const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
 
 // 配置 STUN 服务器 (用于穿透 NAT)
 const rtcConfig = ref<RTCConfiguration>({
@@ -84,10 +93,10 @@ const fetchTurnCredentials = async () => {
     const data = await res.json();
     if (data.iceServers) {
       rtcConfig.value.iceServers = data.iceServers;
-      log('✅ TURN 凭证获取成功');
+      log('TURN 凭证获取成功');
     }
   } catch (e) {
-    log('❌ 获取 TURN 凭证被拒绝 (人机验证失败?)');
+    log('获取 TURN 凭证被拒绝 (人机验证失败?)');
     console.error(e);
     // 验证失败后，通常需要重置验证码
     turnstileToken.value = ''; 
@@ -96,12 +105,8 @@ const fetchTurnCredentials = async () => {
 
 // --- 1. WebSocket 信令部分 ---
 const joinRoom = async () => {
-  // 注意：本地开发通常是 ws://localhost:8787，生产环境是 wss://your-worker.dev
-  // 这里假设你本地开启了 worker dev
   await fetchTurnCredentials();
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // 假设 Worker 运行在 8787 端口 (如果你是混合开发，请改为实际 Worker 地址)
-  const workerHost = 'file-sharing.yyfll.eu.org'; 
   
   socket = new WebSocket(`${wsProtocol}//${workerHost}/api/room?id=${roomId.value}`);
 
@@ -113,8 +118,18 @@ const joinRoom = async () => {
 
   socket.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
-    handleSignalingMessage(msg);
+    handleSocketMessage(msg);
   };
+
+  socket.onclose = (event) => {
+    isConnected.value = false;
+    log(`WebSocket 已关闭，原因: ${event.reason}`);
+  }
+
+  socket.onerror = (event) => {
+    isConnected.value = false;
+    log(`WebSocket 发生错误，已断开连接`);
+  }
 };
 
 // --- 2. WebRTC 核心逻辑 ---
@@ -153,6 +168,52 @@ const setupPeerConnection = () => {
     setupDataChannel(receiveChannel);
   };
 };
+
+const handleSocketMessage = (msg: any) => {
+    // 1. 角色分配
+    if (msg.type === 'role') {
+        myRole.value = msg.role;
+        log(`我的角色: ${msg.role === 'host' ? '房主 (Host)' : '访客 (Guest)'}`);
+        
+        if (msg.role === 'guest') {
+            // 如果是访客，进房立刻敲门
+            isPendingApproval.value = true;
+            socket?.send(JSON.stringify({ type: 'join_request' }));
+            log('已发送加入申请，等待房主通过...');
+        } else {
+            // 如果是房主，直接显示 P2P 准备就绪
+            isConnected.value = true;
+        }
+    }
+
+    // 2. 房主收到请求
+    else if (msg.type === 'join_request') {
+        // 弹窗显示
+        pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
+    }
+
+    // 3. 访客收到许可
+    else if (msg.type === 'join_approve') {
+        isPendingApproval.value = false;
+        isConnected.value = true; // 此时才算真正“入房”成功
+        log('房主已同意！正在建立 P2P 连接...');
+        
+        // 访客作为后入者，通常不需要主动发起 Offer，
+        // 但为了保险，我们可以约定由 Guest 发起，或者由 Host 发起。
+        // 这里沿用之前的逻辑：如果你希望谁主动都行，现在双方都具备资格了。
+    }
+    
+    // 4. 访客被拒绝
+    else if (msg.type === 'join_reject') {
+        alert('房主拒绝了您的加入请求。');
+        location.reload();
+    }
+
+    // 5. 正常的 WebRTC 信令
+    else {
+        handleSignalingMessage(msg);
+    }
+}
 
 // 处理信令消息 (Offer, Answer, Candidate)
 const handleSignalingMessage = async (msg: any) => {
@@ -361,10 +422,14 @@ const handleDataMessageBlobArray = (event: MessageEvent) => {
   }
 };
 
-// --- B. 发送端逻辑：切片 + 背压 ---
-const sendFile = async (event: Event) => {
+const onFileInputChange = async (event: Event) => {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
+  inputFile.value = input.files?.[0];
+}
+
+// --- B. 发送端逻辑：切片 + 背压 ---
+const sendFile = async () => {
+  const file = inputFile.value;
   if (!file || !dataChannel || dataChannel.readyState !== 'open') return;
 
   // 重置状态
@@ -422,6 +487,29 @@ const onChangeSaveMethod = async (event: Event) => {
   saverMethod.value = select.value;
 }
 
+// --- 房主操作函数 ---
+const approveGuest = () => {
+    if (!socket || !pendingGuest.value) return;
+    socket.send(JSON.stringify({ 
+        type: 'join_approve', 
+        guestId: pendingGuest.value.id 
+    }));
+    log(`已允许 ${pendingGuest.value.name} 加入`);
+    pendingGuest.value = null;
+    
+    // 房主主动发起连接 (优化体验)
+    startCall(); 
+};
+
+const rejectGuest = () => {
+    if (!socket || !pendingGuest.value) return;
+    socket.send(JSON.stringify({ 
+        type: 'join_reject', 
+        guestId: pendingGuest.value.id 
+    }));
+    pendingGuest.value = null;
+};
+
 // --- 辅助工具 ---
 const log = (msg: string) => logs.value.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
 const formatSize = (bytes: number) => {
@@ -446,12 +534,33 @@ onUnmounted(async () => {
 <template>
   <div class="container">
     <h1>WebRTC P2P 文件传输 (分片版)</h1>
+
+    <div v-if="isPendingApproval" class="modal-overlay">
+      <div class="modal">
+        <h3>🚪 请求连接...</h3>
+        <p>正在等待房主允许您加入房间。</p>
+        <div class="spinner"></div>
+      </div>
+    </div>
+
+    <div v-if="pendingGuest" class="modal-overlay">
+      <div class="modal">
+        <h3>🔔 新设备请求连接</h3>
+        <p><strong>{{ pendingGuest.name }}</strong></p>
+        <p>房间号码: {{ roomId }}</p>
+        <div class="modal-actions">
+          <button @click="rejectGuest" class="btn-reject">拒绝</button>
+          <button @click="approveGuest" class="btn-approve">允许加入</button>
+        </div>
+      </div>
+    </div>
     
     <div class="box control-box">
       <input v-model="roomId" placeholder="输入房间号" class="input-room"/>
       <div class="buttons">
         <button @click="joinRoom" :disabled="isConnected">1. 进入房间</button>
-        <button @click="startCall" :disabled="!isConnected || p2pStatus === 'connected'">2. 发起连接</button>
+        <!-- <button @click="startCall" :disabled="!isConnected || p2pStatus === 'connected'">2. 发起连接</button> -->
+        <button @click="sendFile" :disabled="!inputFile || !isConnected || p2pStatus !== 'connected'">2. 开始传输</button>
       </div>
       <div class="status">
         <p>WebSocket: {{ isConnected ? '✅' : '❌' }}</p>
@@ -469,10 +578,10 @@ onUnmounted(async () => {
       </div>
     </div>
 
-    <div v-if="p2pStatus === 'connected'" class="box transfer-box">
+    <div v-if="isConnected && p2pStatus === 'connected'" class="box transfer-box">
       <h3>文件操作</h3>
       
-      <input type="file" @change="sendFile" class="file-input" />
+      <input type="file" class="file-input" @change="onFileInputChange" />
       
       <div v-if="transferStatus" class="progress-section">
         <p>{{ transferStatus }}</p>
@@ -514,4 +623,20 @@ onUnmounted(async () => {
   display: flex;
   justify-content: center;
 }
+.modal-overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex; justify-content: center; align-items: center;
+  z-index: 1000;
+}
+.modal {
+  background: white; padding: 25px; border-radius: 12px;
+  text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  min-width: 300px;
+}
+.modal-actions {
+  display: flex; gap: 15px; justify-content: center; margin-top: 20px;
+}
+.btn-approve { background: #4caf50; color: white; border: none; }
+.btn-reject { background: #ff5252; color: white; border: none; }
 </style>
