@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue';
+import streamSaver from 'streamsaver';
 
 // --- 状态变量 ---
 const roomId = ref('1234');
 const isConnected = ref(false); // WebSocket 连接状态
 const p2pStatus = ref('disconnected'); // P2P 连接状态
 const logs = ref<string[]>([]);
-const uploadProgress = ref(0);
+const saverMethod = ref('StreamSaver');
 
 // --- 文件传输状态 ---
 const transferProgress = ref(0);
@@ -23,6 +24,7 @@ let isRemoteDescriptionSet = false;
 
 // --- 接收端缓存变量 ---
 let receivedChunks: Blob[] = []; // 暂存收到的切片
+let fileWriter: WritableStreamDefaultWriter | null = null; //用于写入硬盘的笔
 let receivingMeta: { name: string; size: number; type: string } | null = null;
 let receivedBytes = 0;
 
@@ -49,10 +51,10 @@ const fetchTurnCredentials = async () => {
     // Cloudflare 返回的 iceServers 包含 TURN over UDP, TCP, TLS 等完整配置
     if (data.iceServers) {
       rtcConfig.value.iceServers = data.iceServers;
-      log('✅ 成功获取 TURN 凭证 (解决 IPv4/IPv6 互通)');
+      log('成功获取 TURN 凭证');
     }
   } catch (e) {
-    log('⚠️ 获取 TURN 凭证失败，将仅使用 STUN (可能会失败)');
+    log('获取 TURN 凭证失败，将仅使用 STUN (可能会失败)');
     console.error(e);
   }
 };
@@ -207,11 +209,80 @@ const setupDataChannel = (channel: RTCDataChannel) => {
     p2pStatus.value = 'connected';
   };
   
-  channel.onmessage = handleDataMessage;
+  switch (saverMethod.value) {
+    case "blob":
+      log('使用In-Memory方式保存文件');
+      channel.onmessage = handleDataMessage;
+      break;
+    case "StreamSaver":
+      log('使用StreamSaver保存文件');
+      channel.onmessage = handleDataMessageBlobArray;
+      break;
+    default:
+      channel.onmessage = handleDataMessage;
+  }
+};
+
+// --- A. 接收端逻辑：流式写入 (Modern) ---
+const handleDataMessage = async (event: MessageEvent) => {
+  const data = event.data;
+
+  // 1. 处理控制信令 (Metadata / EOF)
+  if (typeof data === 'string') {
+    const msg = JSON.parse(data);
+
+    if (msg.type === 'meta') {
+      // [新增] 收到元数据，立即触发浏览器的“保存文件”对话框
+      log(`开始接收文件流: ${msg.name}`);
+      receivingMeta = msg;
+      receivedBytes = 0;
+      transferStatus.value = `正在下载: ${msg.name}`;
+
+      // --- 核心变化点：创建文件流 ---
+      //这一步会让浏览器立刻弹出下载任务，或者在底部显示“正在下载...”
+      const fileStream = streamSaver.createWriteStream(msg.name, {
+        size: msg.size // 告诉浏览器文件总大小，这样浏览器能显示准确的进度条
+      });
+      
+      // 获取 writer (写入器)
+      fileWriter = fileStream.getWriter();
+    } 
+    else if (msg.type === 'eof') {
+      // [新增] 传输结束，关闭流
+      if (fileWriter) {
+        await fileWriter.close();
+        fileWriter = null;
+      }
+      
+      receivingMeta = null;
+      transferStatus.value = '下载完成！';
+      log(`文件写入完毕。`);
+      // 注意：流式下载完成后，文件已经躺在用户的“下载”文件夹里了，
+      // 不需要再生成 receivedFileUrl 供用户点击。
+    }
+  } 
+  // 2. 处理文件切片 (ArrayBuffer)
+  else if (data instanceof ArrayBuffer) {
+    if (!fileWriter || !receivingMeta) return;
+
+    // --- 核心变化点：直接写入硬盘 ---
+    // Streams API 需要 Uint8Array，而不是 Blob
+    // 这一步是异步的，但通常很快。
+    // 在极高速网络下，这里其实也应该做背压控制(await writer.ready)，
+    // 但 StreamSaver 内部处理了部分缓冲。
+    await fileWriter.write(new Uint8Array(data));
+
+    receivedBytes += data.byteLength;
+
+    // 更新 UI 进度
+    const percent = Math.floor((receivedBytes / receivingMeta.size) * 100);
+    transferProgress.value = percent;
+  }
 };
 
 // --- A. 接收端逻辑：状态机 ---
-const handleDataMessage = (event: MessageEvent) => {
+// 传统的BlobArray In-Memory形式接收
+const handleDataMessageBlobArray = (event: MessageEvent) => {
   const data = event.data;
 
   // 1. 如果是字符串，说明是控制信令（元数据 或 结束标记）
@@ -223,6 +294,7 @@ const handleDataMessage = (event: MessageEvent) => {
       receivingMeta = msg;
       receivedChunks = [];
       receivedBytes = 0;
+      receivedFileUrl.value = null;
       transferStatus.value = `正在接收: ${msg.name}`;
       log(`开始接收文件: ${msg.name} (${formatSize(msg.size)})`);
     } 
@@ -310,6 +382,11 @@ const sendFile = async (event: Event) => {
   log('文件发送完毕');
 };
 
+const onChangeSaveMethod = async (event: Event) => {
+  const select = event.target as HTMLSelectElement;
+  saverMethod.value = select.value;
+}
+
 // --- 辅助工具 ---
 const log = (msg: string) => logs.value.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
 const formatSize = (bytes: number) => {
@@ -320,7 +397,12 @@ const formatSize = (bytes: number) => {
 };
 
 // 清理
-onUnmounted(() => {
+onUnmounted(async () => {
+  if (fileWriter) {
+    try {
+      await fileWriter.abort("User closed page"); // 中断下载
+    } catch (e) { /* ignore */ }
+  }
   socket?.close();
   peerConnection?.close();
 });
@@ -339,6 +421,13 @@ onUnmounted(() => {
       <div class="status">
         <p>WebSocket: {{ isConnected ? '✅' : '❌' }}</p>
         <p>P2P: <strong>{{ p2pStatus }}</strong></p>
+      </div>
+      <div>
+        <span>文件接收方式</span>
+        <select @change="onChangeSaveMethod">
+          <option value="StreamSaver">StreamSaver</option>
+          <option value="blob">Blob (In-Memory)</option>
+        </select>
       </div>
     </div>
 

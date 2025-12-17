@@ -63,6 +63,10 @@ export class SignalingDurableObject extends DurableObject {
 	// 存储当前房间内的所有 WebSocket 连接
 	sessions: WebSocket[] = [];
 
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		let currentAlarm = await this.ctx.storage.getAlarm();
 		if (currentAlarm !== null) {
@@ -97,9 +101,29 @@ export class SignalingDurableObject extends DurableObject {
 		});
 
 		// 监听关闭
-		webSocket.addEventListener("close", () => {
+		webSocket.addEventListener("close", async () => {
 			this.sessions = this.sessions.filter((s) => s !== webSocket);
+			await this.scheduleCleanup();
 		});
+
+		webSocket.addEventListener("error", async () => {
+			this.sessions = this.sessions.filter((s) => s !== webSocket);
+			await this.scheduleCleanup();
+		});
+	}
+
+	async scheduleCleanup() {
+		// 过滤掉已经关闭的连接，确保计数准确
+		const activeSessions = this.sessions.filter(s => s.readyState === WebSocket.READY_STATE_OPEN);
+
+		// 如果房间空了
+		if (activeSessions.length === 0) {
+			// 设置一个 Alarm，10 分钟 (600秒) 后触发
+			// Date.now() 是毫秒，所以要 + 600 * 1000
+			const cleanupTime = Date.now() + 600 * 1000;
+			await this.ctx.storage.setAlarm(cleanupTime);
+			console.log(this.ctx.id, "房间已空，安排 10 分钟后销毁");
+		}
 	}
 
 	broadcast(message: string, sender: WebSocket) {
@@ -110,13 +134,18 @@ export class SignalingDurableObject extends DurableObject {
 		}
 	}
 
-	async closeOrDisconnect() {
-		if (this.sessions.length === 0) {
-			await this.ctx.storage.setAlarm(Date.now() + 600 * 1000);
-		}
-	}
-
 	async alarm() {
+		const activeSessions = this.sessions.filter(s => s.readyState === WebSocket.READY_STATE_OPEN);
+		if (activeSessions.length > 0) {
+			// 居然还有人？那就不删了
+			return;
+		}
+
+		// 1. 清空所有持久化存储 (如果我们存了 metadata 或密码)
 		await this.ctx.storage.deleteAll();
+
+		// 2. 关闭所有残留的 WebSocket (理论上应该没了，但为了保险)
+		this.sessions.forEach(ws => ws.close(1000, "Room closed due to inactivity"));
+		this.sessions = [];
 	}
 }
