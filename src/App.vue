@@ -1,27 +1,21 @@
 <script setup lang="ts">
-import { ref, onUnmounted, computed } from 'vue';
+import { ref, onUnmounted, computed, watch } from 'vue';
 import streamSaver from 'streamsaver';
 import VueTurnstile from 'vue-turnstile';
-// 引入 Naive UI 组件库
-import { 
-  NConfigProvider, NGlobalStyle, NCard, NInput, NButton, NSpace, 
-  NProgress, NTag, NLog, NModal, NGrid, NGi, NStatistic, NIcon,
+import {
+  NConfigProvider, NGlobalStyle, NCard, NInput, NButton, NSpace,
+  NProgress, NTag, NLog, NModal, NGrid, NGi, NSwitch, NTooltip, NIcon,
   useOsTheme, darkTheme, NMessageProvider, useMessage, NAlert, NDivider
 } from 'naive-ui';
-// 引入图标 (需要 npm install @vicons/ionicons5)
-// 如果没安装图标库，可以把 template 里的 <n-icon> 部分删掉，不影响功能
 import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh } from '@vicons/ionicons5';
 
 // --- UI 主题配置 ---
 const osTheme = useOsTheme();
 const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null));
-
-// 为了在 setup 中使用 message，我们需要包裹一个内部组件，或者简单地在这里定义一个占位符
-// 在实际项目中，建议将逻辑拆分，这里为了单文件运行，我们使用 ref 绑定 message
-const messageRef = ref<any>(null); // Hack: 获取 message 实例
+const messageRef = ref<any>(null);
 
 // --- Cloudflare 配置 ---
-const workerHost = 'file-sharing.yyfll.eu.org'; 
+const workerHost = 'file-sharing.yyfll.eu.org';
 
 // --- Turnstile 状态 ---
 const turnstileToken = ref('');
@@ -29,12 +23,19 @@ const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
 
 // --- 状态变量 ---
 const roomId = ref('1234');
-const isConnected = ref(false); 
-const p2pStatus = ref('disconnected'); 
-const logs = ref<string>(''); // 改为字符串以便 NLog 使用
+const isConnected = ref(false);
+const p2pStatus = ref('disconnected');
+const logs = ref<string>('');
 const saverMethod = ref('StreamSaver');
 const inputFile = ref<File | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
+
+const storedTurn = localStorage.getItem('useTurnServer');
+const useTurnServer = ref(storedTurn === 'false');
+
+watch(useTurnServer, (newValue) => {
+    localStorage.setItem('useTurnServer', String(newValue));
+});
 
 // --- UI 交互状态 ---
 const isJoining = ref(false); // 防止重复点击连接
@@ -42,7 +43,7 @@ const showLogModal = ref(false); // 移动端日志折叠
 
 // --- 文件传输状态 ---
 const transferProgress = ref(0);
-const transferStatus = ref(''); 
+const transferStatus = ref('');
 const receivedFileUrl = ref<string | null>(null);
 const receivedFileName = ref('');
 
@@ -54,19 +55,19 @@ const candidateQueue: RTCIceCandidateInit[] = [];
 let isRemoteDescriptionSet = false;
 
 // --- 接收端缓存变量 ---
-let receivedChunks: Blob[] = []; 
-let fileWriter: WritableStreamDefaultWriter | null = null; 
+let receivedChunks: Blob[] = [];
+let fileWriter: WritableStreamDefaultWriter | null = null;
 let receivingMeta: { name: string; size: number; type: string } | null = null;
 let receivedBytes = 0;
 
 // --- 角色控制变量 ---
 const myRole = ref<'host' | 'guest' | ''>('');
-const isPendingApproval = ref(false); 
+const isPendingApproval = ref(false);
 const pendingGuest = ref<{ name: string; id: number } | null>(null);
 
 // --- 常量配置 ---
-const CHUNK_SIZE = 16 * 1024; 
-const MAX_BUFFERED_AMOUNT = 64 * 1024; 
+const CHUNK_SIZE = 16 * 1024;
+const MAX_BUFFERED_AMOUNT = 64 * 1024;
 
 const rtcConfig = ref<RTCConfiguration>({
   iceServers: [
@@ -93,7 +94,7 @@ const notify = (type: 'success' | 'error' | 'warning' | 'info', content: string)
 // --- 逻辑部分 ---
 
 const onTurnstileExpire = () => {
-  turnstileToken.value = ''; 
+  turnstileToken.value = '';
 };
 
 const onTurnstileVerify = (token: string) => {
@@ -109,10 +110,10 @@ const fetchTurnCredentials = async () => {
 
   log('正在获取 TURN 凭证...');
   try {
-    const res = await fetch('/api/turn', { 
+    const res = await fetch('/api/turn', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: turnstileToken.value }) 
+      body: JSON.stringify({ token: turnstileToken.value })
     });
 
     if (!res.ok) throw new Error('验证失败或服务器拒绝');
@@ -134,9 +135,18 @@ const joinRoom = async () => {
   isJoining.value = true;
 
   try {
-    await fetchTurnCredentials();
+    if (useTurnServer.value) {
+        await fetchTurnCredentials();
+    } else {
+        rtcConfig.value.iceServers = [
+            { urls: 'stun:stun.cloudflare.com:3478' }
+        ];
+        log('⚠️ 已禁用 TURN 中继，仅使用 STUN (局域网/直连模式)');
+        turnstileToken.value = '';
+    }
+
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    
+
     socket = new WebSocket(`${wsProtocol}//${workerHost}/api/room?id=${roomId.value}`);
 
     socket.onopen = () => {
@@ -144,7 +154,7 @@ const joinRoom = async () => {
       isJoining.value = false;
       notify('success', '已连接服务器，等待配对...');
       log('WebSocket 已连接');
-      setupPeerConnection(); 
+      setupPeerConnection();
     };
 
     socket.onmessage = async (event) => {
@@ -174,7 +184,7 @@ const joinRoom = async () => {
 
 const setupPeerConnection = () => {
   peerConnection = new RTCPeerConnection(rtcConfig.value);
-  isRemoteDescriptionSet = false; 
+  isRemoteDescriptionSet = false;
   candidateQueue.length = 0;
 
   peerConnection.onicecandidate = (event) => {
@@ -208,7 +218,8 @@ const handleSocketMessage = (msg: any) => {
             socket?.send(JSON.stringify({ type: 'join_request' }));
             log('已发送入房申请...');
         } else {
-            isConnected.value = true;
+          notify("info", '你是本房间的房主！')
+          isConnected.value = true;
         }
     }
     else if (msg.type === 'join_request') {
@@ -216,7 +227,7 @@ const handleSocketMessage = (msg: any) => {
     }
     else if (msg.type === 'join_approve') {
         isPendingApproval.value = false;
-        isConnected.value = true; 
+        isConnected.value = true;
         notify('success', '房主已同意加入！');
         log('房主同意，建立 P2P 中...');
     }
@@ -236,13 +247,16 @@ const handleSignalingMessage = async (msg: any) => {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       isRemoteDescriptionSet = true;
       processCandidateQueue();
+
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socket?.send(JSON.stringify({ type: 'answer', sdp: answer }));
+
     } else if (msg.type === 'answer') {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       isRemoteDescriptionSet = true;
       processCandidateQueue();
+
     } else if (msg.type === 'candidate') {
       if (!msg.candidate) return;
       if (isRemoteDescriptionSet) {
@@ -258,7 +272,7 @@ const handleSignalingMessage = async (msg: any) => {
 
 const processCandidateQueue = async () => {
   for (const candidate of candidateQueue) {
-    try { await peerConnection?.addIceCandidate(new RTCIceCandidate(candidate)); } 
+    try { await peerConnection?.addIceCandidate(new RTCIceCandidate(candidate)); }
     catch (e) { console.warn(e); }
   }
   candidateQueue.length = 0;
@@ -268,6 +282,7 @@ const startCall = async () => {
   if (!peerConnection) return;
   dataChannel = peerConnection.createDataChannel("file-transfer");
   setupDataChannel(dataChannel);
+
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
   socket?.send(JSON.stringify({ type: 'offer', sdp: offer }));
@@ -280,7 +295,7 @@ const setupDataChannel = (channel: RTCDataChannel) => {
   channel.onopen = () => {
     p2pStatus.value = 'connected';
   };
-  
+
   if (saverMethod.value === 'blob') {
      channel.onmessage = handleDataMessageBlobArray;
   } else {
@@ -296,11 +311,13 @@ const handleDataMessage = async (event: MessageEvent) => {
     if (msg.type === 'meta') {
       log(`⬇️ 开始下载: ${msg.name}`);
       notify('info', `开始接收: ${msg.name}`);
+
       receivingMeta = msg;
       receivedBytes = 0;
       transferStatus.value = `正在下载: ${msg.name}`;
       const fileStream = streamSaver.createWriteStream(msg.name, { size: msg.size });
       fileWriter = fileStream.getWriter();
+
     } else if (msg.type === 'eof') {
       if (fileWriter) { await fileWriter.close(); fileWriter = null; }
       receivingMeta = null;
@@ -328,6 +345,7 @@ const handleDataMessageBlobArray = (event: MessageEvent) => {
       receivedFileUrl.value = null;
       transferStatus.value = `正在缓存: ${msg.name}`;
       log(`⬇️ 开始接收(内存): ${msg.name}`);
+
     } else if (msg.type === 'eof') {
       if (!receivingMeta) return;
       const fileBlob = new Blob(receivedChunks, { type: receivingMeta.type });
@@ -337,12 +355,14 @@ const handleDataMessageBlobArray = (event: MessageEvent) => {
       notify('success', '文件准备就绪，请点击下载');
       receivedChunks = [];
       receivingMeta = null;
+
     }
   } else if (data instanceof ArrayBuffer) {
     if (!receivingMeta) return;
     receivedChunks.push(new Blob([data]));
     receivedBytes += data.byteLength;
     transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
+
   }
 };
 
@@ -390,7 +410,7 @@ const sendFile = async () => {
           await new Promise(resolve => setTimeout(resolve, 10));
       }
       dataChannel.send(JSON.stringify({ type: 'eof' }));
-      
+
       transferStatus.value = '发送完成';
       notify('success', '文件发送成功！');
       log('⬆️ 发送完毕');
@@ -405,7 +425,7 @@ const approveGuest = () => {
     socket.send(JSON.stringify({ type: 'join_approve', guestId: pendingGuest.value.id }));
     log(`已允许 ${pendingGuest.value.name} 加入`);
     pendingGuest.value = null;
-    startCall(); 
+    startCall();
 };
 
 const rejectGuest = () => {
@@ -442,12 +462,12 @@ const MessageRegister = {
     <n-global-style />
     <n-message-provider>
         <MessageRegister />
-        
+
         <div class="main-layout">
             <n-card class="app-card" size="huge" :bordered="false">
                 <template #header>
                     <div class="header-content">
-                        <h2>WebRTC 极速传</h2>
+                        <h2>CF点对点快传</h2>
                         <n-tag :type="isConnected ? 'success' : 'default'" round>
                             {{ isConnected ? '已联网' : '离线' }}
                         </n-tag>
@@ -458,9 +478,9 @@ const MessageRegister = {
                     <div class="section">
                         <n-grid x-gap="12" :cols="2">
                             <n-gi :span="2">
-                                <n-input 
-                                    v-model:value="roomId" 
-                                    placeholder="请输入房间号 (例如 1234)" 
+                                <n-input
+                                    v-model:value="roomId"
+                                    placeholder="请输入房间号 (例如 1234)"
                                     size="large"
                                     :disabled="isConnected || isJoining"
                                 >
@@ -468,12 +488,24 @@ const MessageRegister = {
                                 </n-input>
                             </n-gi>
                         </n-grid>
-                        
+
+                        <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+                            <n-space align="center">
+                                <span style="font-size: 0.9em; color: #666">启用穿透中继 (TURN)</span>
+                                <n-tooltip trigger="hover">
+                                    <template #trigger><n-icon size="16" color="#999"><help-circle-outline /></n-icon> </template>
+                                    开启后可穿透复杂网络，但需要人机验证并启用Cloudflare TURN服务器。
+                                </n-tooltip>
+                            </n-space>
+                            
+                            <n-switch v-model:value="useTurnServer" :disabled="isConnected" />
+                        </div>
+
                         <div style="margin-top: 15px">
-                            <n-button 
-                                type="primary" 
-                                block 
-                                size="large" 
+                            <n-button
+                                type="primary"
+                                block
+                                size="large"
                                 :loading="isJoining"
                                 :disabled="isConnected"
                                 @click="joinRoom"
@@ -486,17 +518,17 @@ const MessageRegister = {
                         </div>
                     </div>
 
-                    <div v-if="!isConnected && !turnstileToken" class="turnstile-container">
-                        <vue-turnstile 
-                            :site-key="siteKey" 
-                            :model-value="turnstileToken" 
-                            @update:model-value="onTurnstileVerify" 
+                    <div v-if="useTurnServer && !isConnected && !turnstileToken" class="turnstile-container">
+                        <vue-turnstile
+                            :site-key="siteKey"
+                            :model-value="turnstileToken"
+                            @update:model-value="onTurnstileVerify"
                             @expire="onTurnstileExpire"
                         />
                     </div>
 
                     <n-divider v-if="isConnected" />
-                    
+
                     <div v-if="isConnected">
                         <n-alert :type="p2pStatus === 'connected' ? 'success' : 'warning'" :show-icon="true">
                             <template #header>
@@ -525,7 +557,7 @@ const MessageRegister = {
                                               <document-attach-outline />
                                           </n-icon>
                                           <div v-if="!inputFile" style="color: #666">点击选择文件</div>
-                                          
+
                                           <div v-else style="max-width: 100%; overflow: hidden; text-align: center; padding: 0 10px;">
                                               <div style="font-weight: bold; font-size: 1.1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
                                                   {{ inputFile.name }}
@@ -537,10 +569,10 @@ const MessageRegister = {
                                 </n-gi>
 
                                 <n-gi>
-                                    <n-button 
-                                        type="success" 
-                                        block 
-                                        size="large" 
+                                    <n-button
+                                        type="success"
+                                        block
+                                        size="large"
                                         :disabled="!inputFile || transferStatus.includes('发送中')"
                                         @click="sendFile"
                                     >
@@ -553,16 +585,15 @@ const MessageRegister = {
                             <div v-if="transferStatus" class="progress-area">
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                                     <span>{{ transferStatus }}</span>
-                                    <!-- <span>{{ transferProgress }}%</span> -->
                                 </div>
-                                <n-progress 
-                                    type="line" 
-                                    :percentage="transferProgress" 
+                                <n-progress
+                                    type="line"
+                                    :percentage="transferProgress"
                                     :status="transferProgress === 100 ? 'success' : 'default'"
                                     processing
                                 />
                             </div>
-                            
+
                             <div v-if="receivedFileUrl" style="margin-top: 15px; text-align: center;">
                                 <n-button tag="a" :href="receivedFileUrl" :download="receivedFileName" type="info" ghost>
                                     <template #icon><n-icon><cloud-download-outline /></n-icon></template>
@@ -594,9 +625,8 @@ const MessageRegister = {
 
         <n-modal :show="!!pendingGuest" :mask-closable="false">
             <n-card style="width: 90%; max-width: 400px" title="🔔 新连接请求" :bordered="false" size="huge">
-                <p style="font-size: 1.1em; margin-bottom: 20px;">
-                    <strong>{{ pendingGuest?.name }}</strong> 请求加入房间 #{{ roomId }}
-                </p>
+                <p style="font-size: 1.1em; margin-bottom: 20px;"><strong>{{ pendingGuest?.name }}</strong></p>
+                <p style="font-size: 1.1em; margin-bottom: 20px;">请求加入房间 #{{ roomId }}</p>
                 <n-grid :cols="2" x-gap="12">
                     <n-gi><n-button block type="error" ghost @click="rejectGuest">拒绝</n-button></n-gi>
                     <n-gi><n-button block type="success" @click="approveGuest">允许加入</n-button></n-gi>
@@ -613,11 +643,11 @@ const MessageRegister = {
     min-height: 100vh;
     display: flex;
     justify-content: center;
-    align-items: center; 
+    align-items: center;
     padding: 20px;
     background-color: v-bind('theme ? "#101014" : "#f0f2f5"');
     transition: background-color 0.3s;
-    box-sizing: border-box; 
+    box-sizing: border-box;
 }
 
 .app-card {
@@ -626,7 +656,7 @@ const MessageRegister = {
     min-width: 320px;  */
     border-radius: 16px;
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
-    overflow: visible; 
+    overflow: visible;
 }
 .header-content {
     display: flex;
@@ -674,12 +704,12 @@ const MessageRegister = {
 @media (max-width: 600px) {
     .main-layout {
         padding: 0;
-        align-items: flex-start; 
+        align-items: flex-start;
     }
     .app-card {
         border-radius: 0;
         box-shadow: none;
-        min-height: 100vh; 
+        min-height: 100vh;
         height: auto;
     }
 }
