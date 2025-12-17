@@ -16,8 +16,10 @@
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
+		"naive-ui": "^2.43.2",
 		"streamsaver": "^2.0.6",
 		"ua-parser-js": "^2.0.7",
+		"vfonts": "^0.0.3",
 		"vue": "^3.5.25",
 		"vue-router": "^4.6.3",
 		"vue-turnstile": "^1.0.11"
@@ -25,8 +27,9 @@
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "^1.18.0",
 		"@tsconfig/node24": "^24.0.3",
-		"@types/node": "^24.10.1",
+		"@types/node": "^24.10.4",
 		"@types/streamsaver": "^2.0.5",
+		"@vicons/ionicons5": "^0.13.0",
 		"@vitejs/plugin-vue": "^6.0.2",
 		"@vue/tsconfig": "^0.8.1",
 		"npm-run-all2": "^8.0.4",

@@ -1,7 +1,24 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
+import { ref, onUnmounted, computed } from 'vue';
 import streamSaver from 'streamsaver';
-import VueTurnstile from 'vue-turnstile'; 
+import VueTurnstile from 'vue-turnstile';
+// 引入 Naive UI 组件库
+import { 
+  NConfigProvider, NGlobalStyle, NCard, NInput, NButton, NSpace, 
+  NProgress, NTag, NLog, NModal, NGrid, NGi, NStatistic, NIcon,
+  useOsTheme, darkTheme, NMessageProvider, useMessage, NAlert, NDivider
+} from 'naive-ui';
+// 引入图标 (需要 npm install @vicons/ionicons5)
+// 如果没安装图标库，可以把 template 里的 <n-icon> 部分删掉，不影响功能
+import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh } from '@vicons/ionicons5';
+
+// --- UI 主题配置 ---
+const osTheme = useOsTheme();
+const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null));
+
+// 为了在 setup 中使用 message，我们需要包裹一个内部组件，或者简单地在这里定义一个占位符
+// 在实际项目中，建议将逻辑拆分，这里为了单文件运行，我们使用 ref 绑定 message
+const messageRef = ref<any>(null); // Hack: 获取 message 实例
 
 // --- Cloudflare 配置 ---
 const workerHost = 'file-sharing.yyfll.eu.org'; 
@@ -12,15 +29,20 @@ const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
 
 // --- 状态变量 ---
 const roomId = ref('1234');
-const isConnected = ref(false); // WebSocket 连接状态
-const p2pStatus = ref('disconnected'); // P2P 连接状态
-const logs = ref<string[]>([]);
+const isConnected = ref(false); 
+const p2pStatus = ref('disconnected'); 
+const logs = ref<string>(''); // 改为字符串以便 NLog 使用
 const saverMethod = ref('StreamSaver');
-const inputFile = ref<File>();
+const inputFile = ref<File | null>(null);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+
+// --- UI 交互状态 ---
+const isJoining = ref(false); // 防止重复点击连接
+const showLogModal = ref(false); // 移动端日志折叠
 
 // --- 文件传输状态 ---
 const transferProgress = ref(0);
-const transferStatus = ref(''); // 例如: "正在发送 45%", "正在接收..."
+const transferStatus = ref(''); 
 const receivedFileUrl = ref<string | null>(null);
 const receivedFileName = ref('');
 
@@ -32,21 +54,20 @@ const candidateQueue: RTCIceCandidateInit[] = [];
 let isRemoteDescriptionSet = false;
 
 // --- 接收端缓存变量 ---
-let receivedChunks: Blob[] = []; // 暂存收到的切片
-let fileWriter: WritableStreamDefaultWriter | null = null; //用于写入硬盘的笔
+let receivedChunks: Blob[] = []; 
+let fileWriter: WritableStreamDefaultWriter | null = null; 
 let receivingMeta: { name: string; size: number; type: string } | null = null;
 let receivedBytes = 0;
 
 // --- 角色控制变量 ---
 const myRole = ref<'host' | 'guest' | ''>('');
-const isPendingApproval = ref(false); // Guest 是否在等
+const isPendingApproval = ref(false); 
 const pendingGuest = ref<{ name: string; id: number } | null>(null);
 
 // --- 常量配置 ---
-const CHUNK_SIZE = 16 * 1024; // 16KB (WebRTC 推荐的安全分片大小)
-const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB (背压阈值，超过就暂停发送)
+const CHUNK_SIZE = 16 * 1024; 
+const MAX_BUFFERED_AMOUNT = 64 * 1024; 
 
-// 配置 STUN 服务器 (用于穿透 NAT)
 const rtcConfig = ref<RTCConfiguration>({
   iceServers: [
     { urls: 'stun:stun.cloudflare.com:3478' },
@@ -55,463 +76,344 @@ const rtcConfig = ref<RTCConfiguration>({
   iceTransportPolicy: 'all'
 });
 
-// 验证过期或失败的回调
+// --- 辅助函数 ---
+const log = (msg: string) => {
+  const time = new Date().toLocaleTimeString();
+  logs.value += `[${time}] ${msg}\n`;
+};
+
+const notify = (type: 'success' | 'error' | 'warning' | 'info', content: string) => {
+    if(messageRef.value) {
+        messageRef.value[type](content);
+    } else {
+        console.log(`[${type.toUpperCase()}] ${content}`);
+    }
+}
+
+// --- 逻辑部分 ---
+
 const onTurnstileExpire = () => {
-  turnstileToken.value = ''; // 清空 token，迫使重新验证
+  turnstileToken.value = ''; 
 };
 
 const onTurnstileVerify = (token: string) => {
-  log('人机验证通过');
+  log('🛡️ 人机验证通过');
   turnstileToken.value = token;
 };
 
-// --- 修改后的获取凭证函数 ---
 const fetchTurnCredentials = async () => {
-  // 1. 检查是否完成了验证
   if (!turnstileToken.value) {
-    alert("请等待人机验证完成，或手动点击验证框。");
-    return;
+    notify('warning', "请等待人机验证完成");
+    throw new Error("Turnstile token missing");
   }
 
   log('正在获取 TURN 凭证...');
   try {
-    // 2. 发送 POST 请求，带上 token
     const res = await fetch('/api/turn', { 
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ 
-        token: turnstileToken.value // <--- 关键：发送 Token 给后端
-      }) 
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: turnstileToken.value }) 
     });
 
-    if (!res.ok) {
-      throw new Error('验证失败或服务器拒绝');
-    }
+    if (!res.ok) throw new Error('验证失败或服务器拒绝');
 
     const data = await res.json();
     if (data.iceServers) {
       rtcConfig.value.iceServers = data.iceServers;
-      log('TURN 凭证获取成功');
+      log('✅ TURN 凭证获取成功');
     }
   } catch (e) {
-    log('获取 TURN 凭证被拒绝 (人机验证失败?)');
-    console.error(e);
-    // 验证失败后，通常需要重置验证码
-    turnstileToken.value = ''; 
+    log('❌ 获取 TURN 凭证被拒绝');
+    turnstileToken.value = '';
+    throw e;
   }
 };
 
-// --- 1. WebSocket 信令部分 ---
 const joinRoom = async () => {
-  await fetchTurnCredentials();
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  
-  socket = new WebSocket(`${wsProtocol}//${workerHost}/api/room?id=${roomId.value}`);
+  if (isJoining.value || isConnected.value) return;
+  isJoining.value = true;
 
-  socket.onopen = () => {
-    isConnected.value = true;
-    log('WebSocket 已连接，等待对方...');
-    setupPeerConnection(); // 建立连接的基础
-  };
+  try {
+    await fetchTurnCredentials();
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    
+    socket = new WebSocket(`${wsProtocol}//${workerHost}/api/room?id=${roomId.value}`);
 
-  socket.onmessage = async (event) => {
-    const msg = JSON.parse(event.data);
-    handleSocketMessage(msg);
-  };
+    socket.onopen = () => {
+      isConnected.value = true;
+      isJoining.value = false;
+      notify('success', '已连接服务器，等待配对...');
+      log('WebSocket 已连接');
+      setupPeerConnection(); 
+    };
 
-  socket.onclose = (event) => {
-    isConnected.value = false;
-    log(`WebSocket 已关闭，原因: ${event.reason}`);
-  }
+    socket.onmessage = async (event) => {
+      const msg = JSON.parse(event.data);
+      handleSocketMessage(msg);
+    };
 
-  socket.onerror = (event) => {
-    isConnected.value = false;
-    log(`WebSocket 发生错误，已断开连接`);
+    socket.onclose = (event) => {
+      isConnected.value = false;
+      isJoining.value = false;
+      p2pStatus.value = 'disconnected';
+      log(`WebSocket 已关闭: ${event.reason}`);
+      notify('error', '连接已断开');
+    }
+
+    socket.onerror = () => {
+      isConnected.value = false;
+      isJoining.value = false;
+      log(`WebSocket 错误`);
+      notify('error', '连接发生错误');
+    }
+  } catch (e) {
+    isJoining.value = false;
+    notify('error', '无法加入房间，请检查网络或验证码');
   }
 };
 
-// --- 2. WebRTC 核心逻辑 ---
 const setupPeerConnection = () => {
   peerConnection = new RTCPeerConnection(rtcConfig.value);
-  isRemoteDescriptionSet = false; // <--- 重置
+  isRemoteDescriptionSet = false; 
   candidateQueue.length = 0;
 
-  // A. 监听 ICE 候选 (网络路径发现)
   peerConnection.onicecandidate = (event) => {
-    // 核心修复：必须判断 event.candidate 是否存在
-    // 当 candidate 为 null 时，表示收集结束，Firefox 不喜欢接收 null
     if (event.candidate && socket) {
-      const c = event.candidate.candidate;
-      log(`收集到 Candidate: ${c.split(' ')[4]} (${c.split(' ')[2]})`);
-      socket.send(JSON.stringify({ 
-        type: 'candidate', 
-        candidate: event.candidate 
-      }));
+      socket.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
     } else {
-      // 这里是收集结束的信号，通常不需要发给对方，或者需要特殊处理
       log('本端 Candidate 收集完毕');
     }
   };
 
-  // B. 监听连接状态变化
   peerConnection.onconnectionstatechange = () => {
-    p2pStatus.value = peerConnection?.connectionState || 'unknown';
-    log(`ICE 连接状态变更: ${p2pStatus.value}`);
+    const state = peerConnection?.connectionState || 'unknown';
+    p2pStatus.value = state;
+    log(`ICE 状态: ${state}`);
+    if (state === 'connected') notify('success', 'P2P 通道已建立！');
+    if (state === 'disconnected' || state === 'failed') notify('error', 'P2P 连接断开');
   };
 
-  // C. 监听对方发来的数据通道 (接收端逻辑)
   peerConnection.ondatachannel = (event) => {
     log('收到数据通道请求');
-    const receiveChannel = event.channel;
-    setupDataChannel(receiveChannel);
+    setupDataChannel(event.channel);
   };
 };
 
 const handleSocketMessage = (msg: any) => {
-    // 1. 角色分配
     if (msg.type === 'role') {
         myRole.value = msg.role;
-        log(`我的角色: ${msg.role === 'host' ? '房主 (Host)' : '访客 (Guest)'}`);
-        
+        log(`角色分配: ${msg.role === 'host' ? '房主' : '访客'}`);
         if (msg.role === 'guest') {
-            // 如果是访客，进房立刻敲门
             isPendingApproval.value = true;
             socket?.send(JSON.stringify({ type: 'join_request' }));
-            log('已发送加入申请，等待房主通过...');
+            log('已发送入房申请...');
         } else {
-            // 如果是房主，直接显示 P2P 准备就绪
             isConnected.value = true;
         }
     }
-
-    // 2. 房主收到请求
     else if (msg.type === 'join_request') {
-        // 弹窗显示
         pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
     }
-
-    // 3. 访客收到许可
     else if (msg.type === 'join_approve') {
         isPendingApproval.value = false;
-        isConnected.value = true; // 此时才算真正“入房”成功
-        log('房主已同意！正在建立 P2P 连接...');
-        
-        // 访客作为后入者，通常不需要主动发起 Offer，
-        // 但为了保险，我们可以约定由 Guest 发起，或者由 Host 发起。
-        // 这里沿用之前的逻辑：如果你希望谁主动都行，现在双方都具备资格了。
+        isConnected.value = true; 
+        notify('success', '房主已同意加入！');
+        log('房主同意，建立 P2P 中...');
     }
-    
-    // 4. 访客被拒绝
     else if (msg.type === 'join_reject') {
-        alert('房主拒绝了您的加入请求。');
-        location.reload();
+        notify('error', '房主拒绝了请求');
+        setTimeout(() => location.reload(), 2000);
     }
-
-    // 5. 正常的 WebRTC 信令
     else {
         handleSignalingMessage(msg);
     }
 }
 
-// 处理信令消息 (Offer, Answer, Candidate)
 const handleSignalingMessage = async (msg: any) => {
   if (!peerConnection) return;
-
   try {
     if (msg.type === 'offer') {
-      // 收到发起请求，我是接收方
-      log('收到 Offer，准备应答...');
       await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-
       isRemoteDescriptionSet = true;
       processCandidateQueue();
-
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socket?.send(JSON.stringify({ type: 'answer', sdp: answer }));
-      log('Answer 已发送');
-      
     } else if (msg.type === 'answer') {
-      // 收到应答，我是发起方
-      log('收到 Answer，握手完成');
       await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-
       isRemoteDescriptionSet = true;
       processCandidateQueue();
-      
     } else if (msg.type === 'candidate') {
-      // 收到网络路径候选
-      const candidate = msg.candidate;
-      if (!candidate) return;
-
-      try {
-        const iceCandidate = new RTCIceCandidate(candidate);
-        
-        if (isRemoteDescriptionSet) {
-          await peerConnection.addIceCandidate(iceCandidate);
-          log('已添加 Candidate');
-        } else {
-          candidateQueue.push(candidate);
-          log('Candidate 已暂存队列');
-        }
-      } catch (e) {
-        // 核心修复：捕获并忽略单个 Candidate 的错误，防止整个连接崩溃
-        console.warn('添加 Candidate 失败 (可能是非标准格式，已忽略):', e);
+      if (!msg.candidate) return;
+      if (isRemoteDescriptionSet) {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      } else {
+        candidateQueue.push(msg.candidate);
       }
     }
   } catch (e) {
-    log('信令处理错误: ' + e);
     console.error(e);
   }
 };
 
 const processCandidateQueue = async () => {
-  log(`处理积压的 ${candidateQueue.length} 个 Candidate...`);
   for (const candidate of candidateQueue) {
-    try {
-      // 这里的 candidate 是纯对象，需要转换
-      await peerConnection?.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (e) {
-      console.warn('队列 Candidate 添加失败:', e);
-    }
+    try { await peerConnection?.addIceCandidate(new RTCIceCandidate(candidate)); } 
+    catch (e) { console.warn(e); }
   }
   candidateQueue.length = 0;
 };
 
-// --- 3. 发起连接 (发起方逻辑) ---
 const startCall = async () => {
   if (!peerConnection) return;
-  
-  // 创建数据通道 (仅发起方需要主动创建)
   dataChannel = peerConnection.createDataChannel("file-transfer");
   setupDataChannel(dataChannel);
-
-  // 创建 Offer
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
   socket?.send(JSON.stringify({ type: 'offer', sdp: offer }));
-  log('已发送 Offer，等待对方...');
+  log('已发送 Offer');
 };
 
-// --- 4. 数据通道与文件传输 ---
 const setupDataChannel = (channel: RTCDataChannel) => {
   dataChannel = channel;
   dataChannel.binaryType = 'arraybuffer';
-  
   channel.onopen = () => {
-    log('P2P 数据通道已打开！可以直接传输文件了');
     p2pStatus.value = 'connected';
   };
   
-  switch (saverMethod.value) {
-    case "blob":
-      log('使用In-Memory方式保存文件');
-      channel.onmessage = handleDataMessageBlobArray;
-      break;
-    case "StreamSaver":
-      log('使用StreamSaver保存文件');
-      channel.onmessage = handleDataMessage;
-      break;
-    default:
-      channel.onmessage = handleDataMessage;
+  if (saverMethod.value === 'blob') {
+     channel.onmessage = handleDataMessageBlobArray;
+  } else {
+     channel.onmessage = handleDataMessage;
   }
 };
 
-// --- A. 接收端逻辑：流式写入 (Modern) ---
+// --- StreamSaver ---
 const handleDataMessage = async (event: MessageEvent) => {
   const data = event.data;
-
-  // 1. 处理控制信令 (Metadata / EOF)
   if (typeof data === 'string') {
     const msg = JSON.parse(data);
-
     if (msg.type === 'meta') {
-      // [新增] 收到元数据，立即触发浏览器的“保存文件”对话框
-      log(`开始接收文件流: ${msg.name}`);
+      log(`⬇️ 开始下载: ${msg.name}`);
+      notify('info', `开始接收: ${msg.name}`);
       receivingMeta = msg;
       receivedBytes = 0;
       transferStatus.value = `正在下载: ${msg.name}`;
-
-      // --- 核心变化点：创建文件流 ---
-      //这一步会让浏览器立刻弹出下载任务，或者在底部显示“正在下载...”
-      const fileStream = streamSaver.createWriteStream(msg.name, {
-        size: msg.size // 告诉浏览器文件总大小，这样浏览器能显示准确的进度条
-      });
-      
-      // 获取 writer (写入器)
+      const fileStream = streamSaver.createWriteStream(msg.name, { size: msg.size });
       fileWriter = fileStream.getWriter();
-    } 
-    else if (msg.type === 'eof') {
-      // [新增] 传输结束，关闭流
-      if (fileWriter) {
-        await fileWriter.close();
-        fileWriter = null;
-      }
-      
+    } else if (msg.type === 'eof') {
+      if (fileWriter) { await fileWriter.close(); fileWriter = null; }
       receivingMeta = null;
-      transferStatus.value = '下载完成！';
-      log(`文件写入完毕。`);
-      // 注意：流式下载完成后，文件已经躺在用户的“下载”文件夹里了，
-      // 不需要再生成 receivedFileUrl 供用户点击。
+      transferStatus.value = '下载完成';
+      notify('success', '文件下载完成');
+      log('⬇️ 文件写入完毕');
     }
-  } 
-  // 2. 处理文件切片 (ArrayBuffer)
-  else if (data instanceof ArrayBuffer) {
+  } else if (data instanceof ArrayBuffer) {
     if (!fileWriter || !receivingMeta) return;
-
-    // --- 核心变化点：直接写入硬盘 ---
-    // Streams API 需要 Uint8Array，而不是 Blob
-    // 这一步是异步的，但通常很快。
-    // 在极高速网络下，这里其实也应该做背压控制(await writer.ready)，
-    // 但 StreamSaver 内部处理了部分缓冲。
     await fileWriter.write(new Uint8Array(data));
-
     receivedBytes += data.byteLength;
-
-    // 更新 UI 进度
-    const percent = Math.floor((receivedBytes / receivingMeta.size) * 100);
-    transferProgress.value = percent;
+    transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
   }
 };
 
-// --- A. 接收端逻辑：状态机 ---
-// 传统的BlobArray In-Memory形式接收
+// --- Blob ---
 const handleDataMessageBlobArray = (event: MessageEvent) => {
   const data = event.data;
-
-  // 1. 如果是字符串，说明是控制信令（元数据 或 结束标记）
   if (typeof data === 'string') {
     const msg = JSON.parse(data);
-
     if (msg.type === 'meta') {
-      // 开始新文件传输
       receivingMeta = msg;
       receivedChunks = [];
       receivedBytes = 0;
       receivedFileUrl.value = null;
-      transferStatus.value = `正在接收: ${msg.name}`;
-      log(`开始接收文件: ${msg.name} (${formatSize(msg.size)})`);
-    } 
-    else if (msg.type === 'eof') {
-      // 文件传输结束，开始组装
+      transferStatus.value = `正在缓存: ${msg.name}`;
+      log(`⬇️ 开始接收(内存): ${msg.name}`);
+    } else if (msg.type === 'eof') {
       if (!receivingMeta) return;
       const fileBlob = new Blob(receivedChunks, { type: receivingMeta.type });
       receivedFileUrl.value = URL.createObjectURL(fileBlob);
       receivedFileName.value = receivingMeta.name;
-      transferStatus.value = '接收完成！';
-      log(`文件接收完成。`);
-      
-      // 清理内存
+      transferStatus.value = '接收完成';
+      notify('success', '文件准备就绪，请点击下载');
       receivedChunks = [];
       receivingMeta = null;
     }
-  } 
-  // 2. 如果是 ArrayBuffer，说明是文件切片
-  else if (data instanceof ArrayBuffer) {
+  } else if (data instanceof ArrayBuffer) {
     if (!receivingMeta) return;
-
-    // 存入 Blob 数组 (比纯 ArrayBuffer 省一点内存)
     receivedChunks.push(new Blob([data]));
     receivedBytes += data.byteLength;
-
-    // 更新进度条
-    const percent = Math.floor((receivedBytes / receivingMeta.size) * 100);
-    transferProgress.value = percent;
+    transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
   }
 };
 
-const onFileInputChange = async (event: Event) => {
-  const input = event.target as HTMLInputElement;
-  inputFile.value = input.files?.[0];
+const triggerFileSelect = () => {
+    fileInputRef.value?.click();
 }
 
-// --- B. 发送端逻辑：切片 + 背压 ---
+const onFileInputChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if(file) {
+      inputFile.value = file;
+      log(`已选择文件: ${file.name} (${formatSize(file.size)})`);
+  }
+}
+
 const sendFile = async () => {
   const file = inputFile.value;
   if (!file || !dataChannel || dataChannel.readyState !== 'open') return;
 
-  // 重置状态
   transferProgress.value = 0;
   transferStatus.value = `准备发送: ${file.name}`;
-  log(`开始发送文件: ${file.name}`);
+  notify('info', '开始发送文件...');
+  log(`⬆️ 开始发送: ${file.name}`);
 
-  // 1. 发送元数据 (Metadata)
-  dataChannel.send(JSON.stringify({
-    type: 'meta',
-    name: file.name,
-    size: file.size,
-    mime: file.type
-  }));
+  try {
+      dataChannel.send(JSON.stringify({
+        type: 'meta', name: file.name, size: file.size, mime: file.type
+      }));
 
-  // 2. 切片发送循环
-  let offset = 0;
-  
-  while (offset < file.size) {
-    // 检查背压：如果缓冲区满了，暂停一下
-    // 这一步至关重要，否则会把浏览器内存撑爆或导致连接断开
-    while (dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-      await new Promise(resolve => setTimeout(resolve, 10)); // 等待 10ms
-    }
+      let offset = 0;
+      while (offset < file.size) {
+        while (dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        const chunk = file.slice(offset, offset + CHUNK_SIZE);
+        const buffer = await chunk.arrayBuffer();
+        dataChannel.send(buffer);
+        offset += CHUNK_SIZE;
+        transferProgress.value = Math.min(100, Math.floor((offset / file.size) * 100));
+        transferStatus.value = "发送中...";
+      }
 
-    // 切片
-    const chunk = file.slice(offset, offset + CHUNK_SIZE);
-    const buffer = await chunk.arrayBuffer(); // 将 Blob 转为 ArrayBuffer
-
-    // 发送
-    dataChannel.send(buffer);
-
-    // 移动指针
-    offset += CHUNK_SIZE;
-
-    // 更新 UI
-    const percent = Math.min(100, Math.floor((offset / file.size) * 100));
-    transferProgress.value = percent;
-    transferStatus.value = `发送中... ${percent}%`;
+      while (dataChannel.bufferedAmount > 0) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      dataChannel.send(JSON.stringify({ type: 'eof' }));
+      
+      transferStatus.value = '发送完成';
+      notify('success', '文件发送成功！');
+      log('⬆️ 发送完毕');
+  } catch(e) {
+      log('发送出错: ' + e);
+      notify('error', '发送过程中断');
   }
-
-  // 3. 发送结束标记 (EOF)
-  // 再次检查缓冲区，确保最后的数据发出去后再发 EOF
-  while (dataChannel.bufferedAmount > 0) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  dataChannel.send(JSON.stringify({ type: 'eof' }));
-  
-  transferStatus.value = '发送完成！';
-  log('文件发送完毕');
 };
 
-const onChangeSaveMethod = async (event: Event) => {
-  const select = event.target as HTMLSelectElement;
-  saverMethod.value = select.value;
-}
-
-// --- 房主操作函数 ---
 const approveGuest = () => {
     if (!socket || !pendingGuest.value) return;
-    socket.send(JSON.stringify({ 
-        type: 'join_approve', 
-        guestId: pendingGuest.value.id 
-    }));
+    socket.send(JSON.stringify({ type: 'join_approve', guestId: pendingGuest.value.id }));
     log(`已允许 ${pendingGuest.value.name} 加入`);
     pendingGuest.value = null;
-    
-    // 房主主动发起连接 (优化体验)
     startCall(); 
 };
 
 const rejectGuest = () => {
     if (!socket || !pendingGuest.value) return;
-    socket.send(JSON.stringify({ 
-        type: 'join_reject', 
-        guestId: pendingGuest.value.id 
-    }));
+    socket.send(JSON.stringify({ type: 'join_reject', guestId: pendingGuest.value.id }));
     pendingGuest.value = null;
 };
 
-// --- 辅助工具 ---
-const log = (msg: string) => logs.value.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
 const formatSize = (bytes: number) => {
   if (bytes === 0) return '0 B';
   const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
@@ -519,124 +421,266 @@ const formatSize = (bytes: number) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-// 清理
 onUnmounted(async () => {
   if (fileWriter) {
-    try {
-      await fileWriter.abort("User closed page"); // 中断下载
-    } catch (e) { /* ignore */ }
+    try { await fileWriter.abort("User closed page"); } catch (e) { /* ignore */ }
   }
   socket?.close();
   peerConnection?.close();
 });
+
+const MessageRegister = {
+  setup() {
+    messageRef.value = useMessage();
+    return () => null;
+  }
+};
 </script>
 
 <template>
-  <div class="container">
-    <h1>WebRTC P2P 文件传输 (分片版)</h1>
+  <n-config-provider :theme="theme">
+    <n-global-style />
+    <n-message-provider>
+        <MessageRegister />
+        
+        <div class="main-layout">
+            <n-card class="app-card" size="huge" :bordered="false">
+                <template #header>
+                    <div class="header-content">
+                        <h2>WebRTC 极速传</h2>
+                        <n-tag :type="isConnected ? 'success' : 'default'" round>
+                            {{ isConnected ? '已联网' : '离线' }}
+                        </n-tag>
+                    </div>
+                </template>
 
-    <div v-if="isPendingApproval" class="modal-overlay">
-      <div class="modal">
-        <h3>🚪 请求连接...</h3>
-        <p>正在等待房主允许您加入房间。</p>
-        <div class="spinner"></div>
-      </div>
-    </div>
+                <n-space vertical size="large">
+                    <div class="section">
+                        <n-grid x-gap="12" :cols="2">
+                            <n-gi :span="2">
+                                <n-input 
+                                    v-model:value="roomId" 
+                                    placeholder="请输入房间号 (例如 1234)" 
+                                    size="large"
+                                    :disabled="isConnected || isJoining"
+                                >
+                                    <template #prefix>#</template>
+                                </n-input>
+                            </n-gi>
+                        </n-grid>
+                        
+                        <div style="margin-top: 15px">
+                            <n-button 
+                                type="primary" 
+                                block 
+                                size="large" 
+                                :loading="isJoining"
+                                :disabled="isConnected"
+                                @click="joinRoom"
+                            >
+                                <template #icon>
+                                    <n-icon><log-in-outline /></n-icon>
+                                </template>
+                                {{ isConnected ? '已在房间中' : '加入 / 创建房间' }}
+                            </n-button>
+                        </div>
+                    </div>
 
-    <div v-if="pendingGuest" class="modal-overlay">
-      <div class="modal">
-        <h3>🔔 新设备请求连接</h3>
-        <p><strong>{{ pendingGuest.name }}</strong></p>
-        <p>房间号码: {{ roomId }}</p>
-        <div class="modal-actions">
-          <button @click="rejectGuest" class="btn-reject">拒绝</button>
-          <button @click="approveGuest" class="btn-approve">允许加入</button>
+                    <div v-if="!isConnected && !turnstileToken" class="turnstile-container">
+                        <vue-turnstile 
+                            :site-key="siteKey" 
+                            :model-value="turnstileToken" 
+                            @update:model-value="onTurnstileVerify" 
+                            @expire="onTurnstileExpire"
+                        />
+                    </div>
+
+                    <n-divider v-if="isConnected" />
+                    
+                    <div v-if="isConnected">
+                        <n-alert :type="p2pStatus === 'connected' ? 'success' : 'warning'" :show-icon="true">
+                            <template #header>
+                                P2P 连接状态: {{ p2pStatus.toUpperCase() }}
+                            </template>
+                            {{ p2pStatus === 'connected' ? '通道畅通，可以开始高速传输。' : '正在寻找对方或建立穿透...' }}
+                        </n-alert>
+
+                        <div v-if="p2pStatus === 'connected'" class="transfer-zone">
+                            <n-grid :cols="1" y-gap="16">
+                                <n-gi>
+                                    <n-space justify="space-between" align="center">
+                                        <span>保存方式:</span>
+                                        <n-space>
+                                            <n-tag checkable :checked="saverMethod === 'StreamSaver'" @click="saverMethod='StreamSaver'">直接下载 (推荐)</n-tag>
+                                            <n-tag checkable :checked="saverMethod === 'blob'" @click="saverMethod='blob'">内存缓存 (兼容)</n-tag>
+                                        </n-space>
+                                    </n-space>
+                                </n-gi>
+
+                                <n-gi>
+                                    <input type="file" ref="fileInputRef" style="display: none" @change="onFileInputChange" />
+                                    <n-card class="drop-zone" :class="{ 'has-file': !!inputFile }" @click="triggerFileSelect">
+                                      <n-space vertical align="center">
+                                          <n-icon size="40" color="#888">
+                                              <document-attach-outline />
+                                          </n-icon>
+                                          <div v-if="!inputFile" style="color: #666">点击选择文件</div>
+                                          
+                                          <div v-else style="max-width: 100%; overflow: hidden; text-align: center; padding: 0 10px;">
+                                              <div style="font-weight: bold; font-size: 1.1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                                                  {{ inputFile.name }}
+                                              </div>
+                                              <div style="font-size: 0.9em; color: #888">{{ formatSize(inputFile.size) }}</div>
+                                          </div>
+                                          </n-space>
+                                  </n-card>
+                                </n-gi>
+
+                                <n-gi>
+                                    <n-button 
+                                        type="success" 
+                                        block 
+                                        size="large" 
+                                        :disabled="!inputFile || transferStatus.includes('发送中')"
+                                        @click="sendFile"
+                                    >
+                                        <template #icon><n-icon><cloud-upload-outline /></n-icon></template>
+                                        开始传输
+                                    </n-button>
+                                </n-gi>
+                            </n-grid>
+
+                            <div v-if="transferStatus" class="progress-area">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                    <span>{{ transferStatus }}</span>
+                                    <!-- <span>{{ transferProgress }}%</span> -->
+                                </div>
+                                <n-progress 
+                                    type="line" 
+                                    :percentage="transferProgress" 
+                                    :status="transferProgress === 100 ? 'success' : 'default'"
+                                    processing
+                                />
+                            </div>
+                            
+                            <div v-if="receivedFileUrl" style="margin-top: 15px; text-align: center;">
+                                <n-button tag="a" :href="receivedFileUrl" :download="receivedFileName" type="info" ghost>
+                                    <template #icon><n-icon><cloud-download-outline /></n-icon></template>
+                                    保存 {{ receivedFileName }}
+                                </n-button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <n-divider />
+                    <n-button size="small" secondary @click="showLogModal = true">查看运行日志</n-button>
+                </n-space>
+            </n-card>
         </div>
-      </div>
-    </div>
-    
-    <div class="box control-box">
-      <input v-model="roomId" placeholder="输入房间号" class="input-room"/>
-      <div class="buttons">
-        <button @click="joinRoom" :disabled="isConnected">1. 进入房间</button>
-        <!-- <button @click="startCall" :disabled="!isConnected || p2pStatus === 'connected'">2. 发起连接</button> -->
-        <button @click="sendFile" :disabled="!inputFile || !isConnected || p2pStatus !== 'connected'">2. 开始传输</button>
-      </div>
-      <div class="status">
-        <p>WebSocket: {{ isConnected ? '✅' : '❌' }}</p>
-        <p>P2P: <strong>{{ p2pStatus }}</strong></p>
-      </div>
-      <div>
-        <span>文件接收方式</span>
-        <select @change="onChangeSaveMethod">
-          <option value="StreamSaver">StreamSaver</option>
-          <option value="blob">Blob (In-Memory)</option>
-        </select>
-      </div>
-      <div v-if="!isConnected && !turnstileToken" class="turnstile-wrapper">
-        <vue-turnstile :site-key="siteKey" :model-value="turnstileToken" @update:model-value="onTurnstileVerify" @expire="onTurnstileExpire"/>
-      </div>
-    </div>
 
-    <div v-if="isConnected && p2pStatus === 'connected'" class="box transfer-box">
-      <h3>文件操作</h3>
-      
-      <input type="file" class="file-input" @change="onFileInputChange" />
-      
-      <div v-if="transferStatus" class="progress-section">
-        <p>{{ transferStatus }}</p>
-        <div class="progress-bar">
-          <div class="progress-fill" :style="{ width: transferProgress + '%' }"></div>
-        </div>
-      </div>
+        <n-modal v-model:show="showLogModal" preset="card" title="系统日志" style="width: 90%; max-width: 600px">
+            <n-log :log="logs" :rows="15" style="font-family: monospace;" />
+        </n-modal>
 
-      <div v-if="receivedFileUrl" class="download-section">
-        <p>✅ 收到文件:</p>
-        <a :href="receivedFileUrl" :download="receivedFileName" class="download-btn">
-          下载 {{ receivedFileName }}
-        </a>
-      </div>
-    </div>
+        <n-modal :show="isPendingApproval" :mask-closable="false">
+            <n-card style="width: 300px; text-align: center;" :bordered="false" size="huge">
+                <template #header>🚪 敲门中...</template>
+                <n-space vertical align="center">
+                    <n-icon size="50" color="#f0a020"><refresh class="spin" /></n-icon>
+                    <p>正在等待房主允许您加入...</p>
+                </n-space>
+            </n-card>
+        </n-modal>
 
-    <div class="logs">
-      <div v-for="(l, i) in logs" :key="i">{{ l }}</div>
-    </div>
-  </div>
+        <n-modal :show="!!pendingGuest" :mask-closable="false">
+            <n-card style="width: 90%; max-width: 400px" title="🔔 新连接请求" :bordered="false" size="huge">
+                <p style="font-size: 1.1em; margin-bottom: 20px;">
+                    <strong>{{ pendingGuest?.name }}</strong> 请求加入房间 #{{ roomId }}
+                </p>
+                <n-grid :cols="2" x-gap="12">
+                    <n-gi><n-button block type="error" ghost @click="rejectGuest">拒绝</n-button></n-gi>
+                    <n-gi><n-button block type="success" @click="approveGuest">允许加入</n-button></n-gi>
+                </n-grid>
+            </n-card>
+        </n-modal>
+
+    </n-message-provider>
+  </n-config-provider>
 </template>
 
 <style scoped>
-.container { max-width: 600px; margin: 0 auto; padding: 20px; font-family: sans-serif; }
-.box { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 20px; background: #f9f9f9; }
-.input-room { padding: 8px; width: 100px; margin-right: 10px; }
-.buttons button { padding: 8px 15px; margin-right: 10px; cursor: pointer; }
-.status { margin-top: 10px; font-size: 0.9em; color: #666; }
-.progress-bar { width: 100%; height: 10px; background: #ddd; border-radius: 5px; overflow: hidden; margin-top: 5px; }
-.progress-fill { height: 100%; background: #4caf50; transition: width 0.2s; }
-.download-btn { display: inline-block; padding: 10px 20px; background: #2196f3; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px; }
-.logs { background: #222; color: #0f0; padding: 10px; height: 150px; overflow-y: auto; font-size: 12px; font-family: monospace; border-radius: 4px; }
-.turnstile-wrapper {
-  margin-bottom: 15px;
-  display: flex;
-  justify-content: center; /* 居中显示 */
+.main-layout {
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center; 
+    padding: 20px;
+    background-color: v-bind('theme ? "#101014" : "#f0f2f5"');
+    transition: background-color 0.3s;
+    box-sizing: border-box; 
 }
-.join-actions {
-  display: flex;
-  justify-content: center;
+
+.app-card {
+    width: 500px;
+    /* max-width: 500px;
+    min-width: 320px;  */
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
+    overflow: visible; 
 }
-.modal-overlay {
-  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-  background: rgba(0,0,0,0.5);
-  display: flex; justify-content: center; align-items: center;
-  z-index: 1000;
+.header-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
-.modal {
-  background: white; padding: 25px; border-radius: 12px;
-  text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-  min-width: 300px;
+.header-content h2 { margin: 0; font-size: 1.5rem; }
+
+.turnstile-container {
+    display: flex;
+    justify-content: center;
+    margin-top: 10px;
+    overflow-x: visible;
 }
-.modal-actions {
-  display: flex; gap: 15px; justify-content: center; margin-top: 20px;
+
+.drop-zone {
+    cursor: pointer;
+    border: 2px dashed rgba(128, 128, 128, 0.3);
+    background-color: rgba(128, 128, 128, 0.05);
+    transition: all 0.2s;
+    text-align: center;
 }
-.btn-approve { background: #4caf50; color: white; border: none; }
-.btn-reject { background: #ff5252; color: white; border: none; }
+.drop-zone:hover {
+    border-color: #63e2b7; /* Naive UI Green */
+    background-color: rgba(99, 226, 183, 0.05);
+}
+.drop-zone.has-file {
+    border-style: solid;
+    border-color: #63e2b7;
+    background-color: rgba(99, 226, 183, 0.1);
+}
+
+.progress-area {
+    margin-top: 20px;
+    padding: 15px;
+    background: rgba(128, 128, 128, 0.05);
+    border-radius: 8px;
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+}
+@keyframes spin { 100% { transform: rotate(360deg); } }
+
+@media (max-width: 600px) {
+    .main-layout {
+        padding: 0;
+        align-items: flex-start; 
+    }
+    .app-card {
+        border-radius: 0;
+        box-shadow: none;
+        min-height: 100vh; 
+        height: auto;
+    }
+}
 </style>
