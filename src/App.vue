@@ -4,18 +4,31 @@ import { ref, onUnmounted } from 'vue';
 // --- 状态变量 ---
 const roomId = ref('1234');
 const isConnected = ref(false); // WebSocket 连接状态
-const p2pStatus = ref('未连接'); // P2P 连接状态
+const p2pStatus = ref('disconnected'); // P2P 连接状态
 const logs = ref<string[]>([]);
-const receivedFileUrl = ref<string | null>(null);
-const receivedFileName = ref<string>('');
 const uploadProgress = ref(0);
-const candidateQueue: RTCIceCandidateInit[] = [];
-let isRemoteDescriptionSet = false;
+
+// --- 文件传输状态 ---
+const transferProgress = ref(0);
+const transferStatus = ref(''); // 例如: "正在发送 45%", "正在接收..."
+const receivedFileUrl = ref<string | null>(null);
+const receivedFileName = ref('');
 
 // --- 核心对象 ---
 let socket: WebSocket | null = null;
 let peerConnection: RTCPeerConnection | null = null;
 let dataChannel: RTCDataChannel | null = null;
+const candidateQueue: RTCIceCandidateInit[] = [];
+let isRemoteDescriptionSet = false;
+
+// --- 接收端缓存变量 ---
+let receivedChunks: Blob[] = []; // 暂存收到的切片
+let receivingMeta: { name: string; size: number; type: string } | null = null;
+let receivedBytes = 0;
+
+// --- 常量配置 ---
+const CHUNK_SIZE = 16 * 1024; // 16KB (WebRTC 推荐的安全分片大小)
+const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB (背压阈值，超过就暂停发送)
 
 // 配置 STUN 服务器 (用于穿透 NAT)
 const rtcConfig = ref<RTCConfiguration>({
@@ -73,15 +86,6 @@ const setupPeerConnection = () => {
   isRemoteDescriptionSet = false; // <--- 重置
   candidateQueue.length = 0;
 
-  peerConnection.oniceconnectionstatechange = () => {
-    const state = peerConnection?.iceConnectionState;
-    log(`ICE 连接状态变更: ${state}`);
-    if (state === 'failed') {
-      log('提示: 连接失败可能是因为防火墙或同一局域网内的 mDNS 问题。');
-      // 这里可以尝试 peerConnection.restartIce() 但对初学者比较复杂
-    }
-  };
-
   // A. 监听 ICE 候选 (网络路径发现)
   peerConnection.onicecandidate = (event) => {
     // 核心修复：必须判断 event.candidate 是否存在
@@ -102,10 +106,12 @@ const setupPeerConnection = () => {
   // B. 监听连接状态变化
   peerConnection.onconnectionstatechange = () => {
     p2pStatus.value = peerConnection?.connectionState || 'unknown';
+    log(`ICE 连接状态变更: ${p2pStatus.value}`);
   };
 
   // C. 监听对方发来的数据通道 (接收端逻辑)
   peerConnection.ondatachannel = (event) => {
+    log('收到数据通道请求');
     const receiveChannel = event.channel;
     setupDataChannel(receiveChannel);
   };
@@ -194,50 +200,124 @@ const startCall = async () => {
 // --- 4. 数据通道与文件传输 ---
 const setupDataChannel = (channel: RTCDataChannel) => {
   dataChannel = channel;
+  dataChannel.binaryType = 'arraybuffer';
   
-  channel.onopen = () => log('P2P 数据通道已打开！可以直接传输文件了');
-  
-  // 接收文件逻辑 (简化版：假设一次性传完，大文件需要分片)
-  let receivedBuffers: ArrayBuffer[] = [];
-  
-  channel.onmessage = (event) => {
-    const data = event.data;
-    // 如果是字符串，可能是元数据（文件名）
-    if (typeof data === 'string') {
-      try {
-        const meta = JSON.parse(data);
-        if (meta.fileName) receivedFileName.value = meta.fileName;
-        log(`准备接收文件: ${meta.fileName}`);
-      } catch (e) { log('收到消息: ' + data); }
-    } 
-    // 如果是二进制，就是文件内容
-    else {
-      receivedBuffers.push(data);
-      // 简单处理：收到数据就生成下载链接 (实际应判断是否接收完毕)
-      const blob = new Blob(receivedBuffers);
-      receivedFileUrl.value = URL.createObjectURL(blob);
-      log(`文件接收完成，大小: ${blob.size} bytes`);
-      receivedBuffers = []; // 清空缓存
-    }
+  channel.onopen = () => {
+    log('P2P 数据通道已打开！可以直接传输文件了');
+    p2pStatus.value = 'connected';
   };
+  
+  channel.onmessage = handleDataMessage;
 };
 
+// --- A. 接收端逻辑：状态机 ---
+const handleDataMessage = (event: MessageEvent) => {
+  const data = event.data;
+
+  // 1. 如果是字符串，说明是控制信令（元数据 或 结束标记）
+  if (typeof data === 'string') {
+    const msg = JSON.parse(data);
+
+    if (msg.type === 'meta') {
+      // 开始新文件传输
+      receivingMeta = msg;
+      receivedChunks = [];
+      receivedBytes = 0;
+      transferStatus.value = `正在接收: ${msg.name}`;
+      log(`开始接收文件: ${msg.name} (${formatSize(msg.size)})`);
+    } 
+    else if (msg.type === 'eof') {
+      // 文件传输结束，开始组装
+      if (!receivingMeta) return;
+      const fileBlob = new Blob(receivedChunks, { type: receivingMeta.type });
+      receivedFileUrl.value = URL.createObjectURL(fileBlob);
+      receivedFileName.value = receivingMeta.name;
+      transferStatus.value = '接收完成！';
+      log(`文件接收完成。`);
+      
+      // 清理内存
+      receivedChunks = [];
+      receivingMeta = null;
+    }
+  } 
+  // 2. 如果是 ArrayBuffer，说明是文件切片
+  else if (data instanceof ArrayBuffer) {
+    if (!receivingMeta) return;
+
+    // 存入 Blob 数组 (比纯 ArrayBuffer 省一点内存)
+    receivedChunks.push(new Blob([data]));
+    receivedBytes += data.byteLength;
+
+    // 更新进度条
+    const percent = Math.floor((receivedBytes / receivingMeta.size) * 100);
+    transferProgress.value = percent;
+  }
+};
+
+// --- B. 发送端逻辑：切片 + 背压 ---
 const sendFile = async (event: Event) => {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file || !dataChannel || dataChannel.readyState !== 'open') return;
 
-  // 1. 先发文件名
-  dataChannel.send(JSON.stringify({ fileName: file.name }));
+  // 重置状态
+  transferProgress.value = 0;
+  transferStatus.value = `准备发送: ${file.name}`;
+  log(`开始发送文件: ${file.name}`);
+
+  // 1. 发送元数据 (Metadata)
+  dataChannel.send(JSON.stringify({
+    type: 'meta',
+    name: file.name,
+    size: file.size,
+    mime: file.type
+  }));
+
+  // 2. 切片发送循环
+  let offset = 0;
   
-  // 2. 发送文件内容
-  const arrayBuffer = await file.arrayBuffer();
-  dataChannel.send(arrayBuffer);
-  log(`文件已发送: ${file.name}`);
+  while (offset < file.size) {
+    // 检查背压：如果缓冲区满了，暂停一下
+    // 这一步至关重要，否则会把浏览器内存撑爆或导致连接断开
+    while (dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+      await new Promise(resolve => setTimeout(resolve, 10)); // 等待 10ms
+    }
+
+    // 切片
+    const chunk = file.slice(offset, offset + CHUNK_SIZE);
+    const buffer = await chunk.arrayBuffer(); // 将 Blob 转为 ArrayBuffer
+
+    // 发送
+    dataChannel.send(buffer);
+
+    // 移动指针
+    offset += CHUNK_SIZE;
+
+    // 更新 UI
+    const percent = Math.min(100, Math.floor((offset / file.size) * 100));
+    transferProgress.value = percent;
+    transferStatus.value = `发送中... ${percent}%`;
+  }
+
+  // 3. 发送结束标记 (EOF)
+  // 再次检查缓冲区，确保最后的数据发出去后再发 EOF
+  while (dataChannel.bufferedAmount > 0) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  dataChannel.send(JSON.stringify({ type: 'eof' }));
+  
+  transferStatus.value = '发送完成！';
+  log('文件发送完毕');
 };
 
-// 日志辅助
-const log = (msg: string) => logs.value.push(msg);
+// --- 辅助工具 ---
+const log = (msg: string) => logs.value.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
+const formatSize = (bytes: number) => {
+  if (bytes === 0) return '0 B';
+  const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
 
 // 清理
 onUnmounted(() => {
@@ -248,27 +328,38 @@ onUnmounted(() => {
 
 <template>
   <div class="container">
-    <h1>WebRTC P2P 文件分享</h1>
+    <h1>WebRTC P2P 文件传输 (分片版)</h1>
     
-    <div class="control-panel">
-      <input v-model="roomId" placeholder="输入房间号 (例如 1234)" />
-      <button @click="joinRoom" :disabled="isConnected">1. 进入房间</button>
-      <button @click="startCall" :disabled="!isConnected">2. 发起连接 (仅一方点击)</button>
+    <div class="box control-box">
+      <input v-model="roomId" placeholder="输入房间号" class="input-room"/>
+      <div class="buttons">
+        <button @click="joinRoom" :disabled="isConnected">1. 进入房间</button>
+        <button @click="startCall" :disabled="!isConnected || p2pStatus === 'connected'">2. 发起连接</button>
+      </div>
+      <div class="status">
+        <p>WebSocket: {{ isConnected ? '✅' : '❌' }}</p>
+        <p>P2P: <strong>{{ p2pStatus }}</strong></p>
+      </div>
     </div>
 
-    <div class="status-box">
-      <p>WebSocket: {{ isConnected ? '✅ 在线' : '❌ 离线' }}</p>
-      <p>P2P 状态: <strong>{{ p2pStatus }}</strong></p>
-    </div>
+    <div v-if="p2pStatus === 'connected'" class="box transfer-box">
+      <h3>文件操作</h3>
+      
+      <input type="file" @change="sendFile" class="file-input" />
+      
+      <div v-if="transferStatus" class="progress-section">
+        <p>{{ transferStatus }}</p>
+        <div class="progress-bar">
+          <div class="progress-fill" :style="{ width: transferProgress + '%' }"></div>
+        </div>
+      </div>
 
-    <div v-if="p2pStatus === 'connected'" class="upload-area">
-      <h3>发送文件</h3>
-      <input type="file" @change="sendFile" />
-    </div>
-
-    <div v-if="receivedFileUrl" class="download-area">
-      <h3>收到文件</h3>
-      <a :href="receivedFileUrl" :download="receivedFileName">点击下载 {{ receivedFileName }}</a>
+      <div v-if="receivedFileUrl" class="download-section">
+        <p>✅ 收到文件:</p>
+        <a :href="receivedFileUrl" :download="receivedFileName" class="download-btn">
+          下载 {{ receivedFileName }}
+        </a>
+      </div>
     </div>
 
     <div class="logs">
@@ -279,8 +370,12 @@ onUnmounted(() => {
 
 <style scoped>
 .container { max-width: 600px; margin: 0 auto; padding: 20px; font-family: sans-serif; }
-.control-panel { display: flex; gap: 10px; margin-bottom: 20px; }
-.status-box { background: #f0f0f0; padding: 10px; border-radius: 8px; margin-bottom: 20px; }
-.logs { background: #333; color: #0f0; padding: 10px; height: 200px; overflow-y: auto; font-size: 12px; border-radius: 4px;}
-.upload-area, .download-area { border: 2px dashed #ccc; padding: 20px; margin-bottom: 20px; text-align: center; }
+.box { border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 20px; background: #f9f9f9; }
+.input-room { padding: 8px; width: 100px; margin-right: 10px; }
+.buttons button { padding: 8px 15px; margin-right: 10px; cursor: pointer; }
+.status { margin-top: 10px; font-size: 0.9em; color: #666; }
+.progress-bar { width: 100%; height: 10px; background: #ddd; border-radius: 5px; overflow: hidden; margin-top: 5px; }
+.progress-fill { height: 100%; background: #4caf50; transition: width 0.2s; }
+.download-btn { display: inline-block; padding: 10px 20px; background: #2196f3; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px; }
+.logs { background: #222; color: #0f0; padding: 10px; height: 150px; overflow-y: auto; font-size: 12px; font-family: monospace; border-radius: 4px; }
 </style>
