@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue';
 import streamSaver from 'streamsaver';
+import VueTurnstile from 'vue-turnstile'; 
 
 // --- 状态变量 ---
 const roomId = ref('1234');
@@ -32,6 +33,10 @@ let receivedBytes = 0;
 const CHUNK_SIZE = 16 * 1024; // 16KB (WebRTC 推荐的安全分片大小)
 const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB (背压阈值，超过就暂停发送)
 
+// --- Turnstile 状态 ---
+const turnstileToken = ref('');
+const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
+
 // 配置 STUN 服务器 (用于穿透 NAT)
 const rtcConfig = ref<RTCConfiguration>({
   iceServers: [
@@ -41,21 +46,51 @@ const rtcConfig = ref<RTCConfiguration>({
   iceTransportPolicy: 'all'
 });
 
+// 验证过期或失败的回调
+const onTurnstileExpire = () => {
+  turnstileToken.value = ''; // 清空 token，迫使重新验证
+};
+
+const onTurnstileVerify = (token: string) => {
+  log('人机验证通过');
+  turnstileToken.value = token;
+};
+
+// --- 修改后的获取凭证函数 ---
 const fetchTurnCredentials = async () => {
+  // 1. 检查是否完成了验证
+  if (!turnstileToken.value) {
+    alert("请等待人机验证完成，或手动点击验证框。");
+    return;
+  }
+
+  log('正在获取 TURN 凭证...');
   try {
-    log('正在获取 TURN 中继服务器配置...');
-    // 注意：如果是本地开发，确保 URL 指向你的 Worker 地址
-    const response = await fetch('/api/turn', { method: 'POST' });
-    const data = await response.json();
-    
-    // Cloudflare 返回的 iceServers 包含 TURN over UDP, TCP, TLS 等完整配置
+    // 2. 发送 POST 请求，带上 token
+    const res = await fetch('/api/turn', { 
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ 
+        token: turnstileToken.value // <--- 关键：发送 Token 给后端
+      }) 
+    });
+
+    if (!res.ok) {
+      throw new Error('验证失败或服务器拒绝');
+    }
+
+    const data = await res.json();
     if (data.iceServers) {
       rtcConfig.value.iceServers = data.iceServers;
-      log('成功获取 TURN 凭证');
+      log('✅ TURN 凭证获取成功');
     }
   } catch (e) {
-    log('获取 TURN 凭证失败，将仅使用 STUN (可能会失败)');
+    log('❌ 获取 TURN 凭证被拒绝 (人机验证失败?)');
     console.error(e);
+    // 验证失败后，通常需要重置验证码
+    turnstileToken.value = ''; 
   }
 };
 
@@ -212,11 +247,11 @@ const setupDataChannel = (channel: RTCDataChannel) => {
   switch (saverMethod.value) {
     case "blob":
       log('使用In-Memory方式保存文件');
-      channel.onmessage = handleDataMessage;
+      channel.onmessage = handleDataMessageBlobArray;
       break;
     case "StreamSaver":
       log('使用StreamSaver保存文件');
-      channel.onmessage = handleDataMessageBlobArray;
+      channel.onmessage = handleDataMessage;
       break;
     default:
       channel.onmessage = handleDataMessage;
@@ -429,6 +464,9 @@ onUnmounted(async () => {
           <option value="blob">Blob (In-Memory)</option>
         </select>
       </div>
+      <div v-if="!isConnected && !turnstileToken" class="turnstile-wrapper">
+        <vue-turnstile :site-key="siteKey" :model-value="turnstileToken" @update:model-value="onTurnstileVerify" @expire="onTurnstileExpire"/>
+      </div>
     </div>
 
     <div v-if="p2pStatus === 'connected'" class="box transfer-box">
@@ -467,4 +505,13 @@ onUnmounted(async () => {
 .progress-fill { height: 100%; background: #4caf50; transition: width 0.2s; }
 .download-btn { display: inline-block; padding: 10px 20px; background: #2196f3; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px; }
 .logs { background: #222; color: #0f0; padding: 10px; height: 150px; overflow-y: auto; font-size: 12px; font-family: monospace; border-radius: 4px; }
+.turnstile-wrapper {
+  margin-bottom: 15px;
+  display: flex;
+  justify-content: center; /* 居中显示 */
+}
+.join-actions {
+  display: flex;
+  justify-content: center;
+}
 </style>

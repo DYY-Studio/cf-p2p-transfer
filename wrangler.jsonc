@@ -29,10 +29,6 @@
 			]
 		}
 	],
-	"vars": {
-		"TURN_KEY_ID": "YOUR TURN SERVERS' KEY ID",
-		"TURN_KEY_API_TOKEN": "YOUR TURN SERVERS' API TOKEN"
-	},
 	"workers_dev": false,
 	"preview_urls": false
 	/**

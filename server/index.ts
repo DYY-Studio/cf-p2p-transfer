@@ -4,6 +4,7 @@ export interface Env {
 	SIGNALING_DO: DurableObjectNamespace;
 	TURN_KEY_ID: string;
 	TURN_KEY_API_TOKEN: string;
+	TURNSTILE_SECRET_KEY: string;
 }
 
 export default {
@@ -29,6 +30,44 @@ export default {
 		}
 
 		if (url.pathname === "/api/turn" && request.method === "POST") {
+			let clientToken = "";
+      
+			try {
+				const body = await request.json() as any;
+				clientToken = body.token;
+			} catch (e) {
+				return new Response("Missing JSON body", { status: 400 });
+			}
+
+			if (!clientToken) {
+				return new Response("Missing Turnstile token", { status: 403 });
+			}
+
+			// 1. 获取客户端 IP (Cloudflare Worker 会自动通过 header 传递)
+			const ip = request.headers.get("CF-Connecting-IP");
+
+			// 2. 构造验证请求
+			const formData = new FormData();
+			formData.append("secret", env.TURNSTILE_SECRET_KEY);
+			formData.append("response", clientToken);
+			if (ip) formData.append("remoteip", ip);
+
+			// 3. 向 Cloudflare 验证 API 发起请求
+			const verifyUrl = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+			const verifyRes = await fetch(verifyUrl, {
+				method: "POST",
+				body: formData,
+			});
+
+			const verifyResult = await verifyRes.json() as any;
+
+			// 4. 判断验证结果
+			if (!verifyResult.success) {
+				console.log("Turnstile validation failed:", verifyResult);
+				return new Response("Invalid Captcha", { status: 403 });
+			}
+
+
 			// 这里的 API 地址是 Cloudflare Calls 专用的
 			const endpoint = `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`;
 			
