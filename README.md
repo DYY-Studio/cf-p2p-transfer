@@ -37,7 +37,7 @@ cd cf-p2p-transfer
 你需要获取以下密钥和配置：
 
 * **Turnstile (人机验证)** 
-  * 在 Cloudflare Dashboard -> Application Safety -> Turnstile 中添加站点，获取 `Site Key` 和 `Secret Key`。
+  * 在 Cloudflare Dashboard -> Application Security -> Turnstile 中添加站点，获取 `Site Key` 和 `Secret Key`。
 * (可选) **Cloudflare TURN Server** 
   * 在 Cloudflare Dashboard -> Media -> Realtime -> TURN Server 中创建一个 App，获取 `Key ID` 和 `API Token`。
 
