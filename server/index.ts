@@ -96,7 +96,7 @@ export default {
 };
 
 type SignalMessage = {
-  type: 'role' | 'join_request' | 'join_approve' | 'join_reject' | 'offer' | 'answer' | 'candidate';
+  type: 'role' | 'join_request' | 'join_approve' | 'join_reject' | 'offer' | 'answer' | 'candidate' | 'ping' | 'pong';
   [key: string]: any;
 };
 
@@ -195,6 +195,11 @@ export class SignalingDurableObject extends DurableObject {
 						guestWs.send(JSON.stringify({ type: 'join_reject' }));
 						guestWs.close(); // 拒绝后直接断开
 					}
+					return;
+				}
+
+				if (msg.type === 'ping') {
+					webSocket.send(JSON.stringify({type: 'pong'}));
 					return;
 				}
 

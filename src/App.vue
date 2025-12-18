@@ -23,7 +23,7 @@ const {
   receivedFileUrl, receivedFileName, 
   saverMethod,
   transferSpeed, timeRemaining,
-  setupTransferChannel, sendFiles
+  setupTransferChannel, sendFiles, cancelTransfer
 } = useFileTransfer(log);
 
 // --- UI 主题配置 ---
@@ -173,11 +173,27 @@ const handleSendClick = async () => {
   if (inputFiles.value.length === 0) return;
   try {
     await sendFiles(inputFiles.value);
-    notify('success', '发送成功');
+    if (!transferStatus.value.includes('完成')) {
+      notify('info', '发送已取消（详见日志）');
+    } else {
+      notify('success', '发送完成');
+    }
   } catch (e) {
     notify('error', '发送失败');
   }
 };
+
+const connectionStateText = computed(() => {
+    if (isConnected.value) return '在线';
+    if (isJoining.value) return '连接中...';
+    return '离线';
+});
+
+const connectionStateType = computed(() => {
+    if (isConnected.value) return 'success';
+    if (isJoining.value) return 'warning';
+    return 'error';
+});
 
 const MessageRegister = {
   setup() {
@@ -198,8 +214,8 @@ const MessageRegister = {
                 <template #header>
                     <div class="header-content">
                         <h2>CF点对点快传</h2>
-                        <n-tag :type="isConnected ? 'success' : 'default'" round>
-                            {{ isConnected ? '已联网' : '离线' }}
+                        <n-tag :type="connectionStateType" round>
+                            {{ connectionStateText }}
                         </n-tag>
                     </div>
                 </template>
@@ -365,6 +381,17 @@ const MessageRegister = {
                             </n-grid>
 
                             <div v-if="transferStatus" class="progress-area">
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                                  <n-button 
+                                      v-if="transferProgress < 100 && !transferStatus.includes('完成') && !transferStatus.includes('中断')" 
+                                      size="tiny" 
+                                      type="error" 
+                                      secondary
+                                      @click="cancelTransfer"
+                                  >
+                                      取消
+                                  </n-button>
+                              </div>
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                                     <span>{{ transferStatus }}</span>
                                 </div>
