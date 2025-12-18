@@ -16,6 +16,7 @@
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
+		"client-zip": "^2.5.0",
 		"naive-ui": "^2.43.2",
 		"streamsaver": "^2.0.6",
 		"ua-parser-js": "^2.0.7",

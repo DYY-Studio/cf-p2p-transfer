@@ -1,6 +1,7 @@
 import { ref } from 'vue';
 import streamSaver from 'streamsaver';
 import { formatSize, formatTime } from '@/utils';
+import { downloadZip } from 'client-zip';
 
 // --- 常量配置 ---
 const CHUNK_SIZE = 16 * 1024; // 16KB 分片
@@ -24,6 +25,8 @@ export function useFileTransfer(log: (msg: string) => void) {
   let activeDataChannel: RTCDataChannel | null = null;
   let speedInterval: any = null;
   let lastBytes = 0;
+
+  const calculateTotalSize = (files: File[]) => files.reduce((acc, f) => acc + f.size, 0);
 
   // --- 核心逻辑：绑定通道 ---
   const setupTransferChannel = (channel: RTCDataChannel) => {
@@ -77,40 +80,76 @@ export function useFileTransfer(log: (msg: string) => void) {
   };
 
   // --- 逻辑 A：发送端 (带背压控制) ---
-  const sendFile = async (file: File) => {
+  const sendFiles = async (files: File[]) => {
     if (!activeDataChannel || activeDataChannel.readyState !== 'open') {
       throw new Error("P2P 通道未就绪");
     }
 
-    transferProgress.value = 0;
-    transferStatus.value = `准备发送: ${file.name}`;
-    log(`⬆️ 开始发送: ${file.name}`);
+    if (files.length === 0) return;
+    if (!files[0]) return;
 
-    startSpeedTracker(file.size);
+    const isSingle = files.length === 1;
+    const totalSize = calculateTotalSize(files);
+
+    const metaName = isSingle ? files[0].name : 'archive.zip';
+    const metaType = isSingle ? files[0].type : 'application/zip';
+
+    transferProgress.value = 0;
+    transferStatus.value = `准备发送: ${metaName}`;
+    log(`⬆️ 开始发送: ${metaName} (${files.length} 个文件)`);
+
+    startSpeedTracker(totalSize);
 
     try {
       // 1. 发送元数据
       activeDataChannel.send(JSON.stringify({
-        type: 'meta', name: file.name, size: file.size, mime: file.type
+        type: 'meta', 
+        name: metaName, 
+        size: totalSize, 
+        mime: metaType,
+        zipped: !isSingle
       }));
 
+      let readableStream: ReadableStream<Uint8Array>;
+
+      if (isSingle) {
+        readableStream = files[0].stream();
+      } else {
+        const filesForZip = files.map(f => ({
+          name: f.webkitRelativePath || f.name, // 优先使用相对路径保留文件夹结构
+          lastModified: new Date(f.lastModified),
+          input: f
+        }));
+        readableStream = downloadZip(filesForZip).body!;
+      }
+
       // 2. 分片发送循环
-      let offset = 0;
-      while (offset < file.size) {
-        // 背压控制：如果缓冲区满了，暂停发送，防止浏览器崩溃
-        while (activeDataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-          await new Promise(resolve => setTimeout(resolve, 10));
-        }
+      const reader = readableStream.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-        const chunk = file.slice(offset, offset + CHUNK_SIZE);
-        const buffer = await chunk.arrayBuffer();
-        activeDataChannel.send(buffer);
+        let chunkOffset = 0;
         
-        offset += CHUNK_SIZE;
+        while (chunkOffset < value.byteLength) {
 
-        processedBytes = offset;
-        transferProgress.value = Math.min(100, Math.floor((offset / file.size) * 100));
-        transferStatus.value = "发送中...";
+          // 背压控制：如果缓冲区满了，暂停发送，防止浏览器崩溃
+          while (activeDataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+
+          const end = Math.min(chunkOffset + CHUNK_SIZE, value.byteLength);
+          const chunk = value.subarray(chunkOffset, end);
+
+          activeDataChannel.send(chunk as Uint8Array<ArrayBuffer>);
+          
+          const chunkSize = chunk.byteLength;
+          chunkOffset += chunkSize;
+          processedBytes += chunkSize;
+
+          transferProgress.value = Math.min(100, Math.floor((processedBytes / totalSize) * 100));
+          transferStatus.value = "发送中...";
+        }
       }
 
       // 3. 确保最后的数据发完
@@ -155,7 +194,7 @@ export function useFileTransfer(log: (msg: string) => void) {
     } else if (data instanceof ArrayBuffer && fileWriter && receivingMeta) {
       await fileWriter.write(new Uint8Array(data));
       processedBytes += data.byteLength;
-      transferProgress.value = Math.floor((processedBytes / receivingMeta.size) * 100);
+      transferProgress.value = Math.min(100, Math.floor((processedBytes / receivingMeta.size) * 100));
     }
   };
 
@@ -186,7 +225,7 @@ export function useFileTransfer(log: (msg: string) => void) {
     } else if (data instanceof ArrayBuffer && receivingMeta) {
       receivedChunks.push(new Blob([data]));
       processedBytes += data.byteLength;
-      transferProgress.value = Math.floor((processedBytes / receivingMeta.size) * 100);
+      transferProgress.value = Math.min(100, Math.floor((processedBytes / receivingMeta.size) * 100));
     }
   };
 
@@ -195,6 +234,6 @@ export function useFileTransfer(log: (msg: string) => void) {
     receivedFileUrl, receivedFileName,
     saverMethod,
     transferSpeed, timeRemaining,
-    setupTransferChannel, sendFile
+    setupTransferChannel, sendFiles
   };
 }

@@ -4,7 +4,7 @@ const WORKER_HOST = import.meta.env.VITE_WORKER_HOST;
 
 export function useRoomConnection() {
   // --- 状态定义 ---
-  const roomId = ref('1234');
+  const roomId = ref('');
   const isConnected = ref(false); // WebSocket 连接状态
   const isJoining = ref(false);
   const p2pStatus = ref<'disconnected' | 'new' | 'connecting' | 'connected' | 'failed'>('disconnected'); // P2P 状态

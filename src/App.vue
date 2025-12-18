@@ -23,7 +23,7 @@ const {
   receivedFileUrl, receivedFileName, 
   saverMethod,
   transferSpeed, timeRemaining,
-  setupTransferChannel, sendFile
+  setupTransferChannel, sendFiles
 } = useFileTransfer(log);
 
 // --- UI 主题配置 ---
@@ -36,8 +36,9 @@ const turnstileToken = ref('');
 const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 
 // --- 状态变量 ---
-const inputFile = ref<File | null>(null);
+const inputFiles = ref<File[]>([]);
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const folderInputRef = ref<HTMLInputElement | null>(null);
 const activeTab = ref('join');
 
 const storedTurn = localStorage.getItem('useTurnServer');
@@ -144,26 +145,37 @@ const handleJoinRoom = async () => {
   }
 };
 
-const triggerFileSelect = () => {
-  fileInputRef.value?.click();
-}
+const triggerFolderSelect = () => folderInputRef.value?.click();
+const triggerFileSelect = () => fileInputRef.value?.click();
 
-const onFileInputChange = async (event: Event) => {
+const onFileInputChange = (event: Event) => {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (file) {
-    inputFile.value = file;
-    log(`已选择文件: ${file.name} (${formatSize(file.size)})`);
+  if (input.files && input.files.length > 0) {
+    // 将 FileList 转为 Array
+    inputFiles.value = Array.from(input.files);
+    
+    const count = inputFiles.value.length;
+    if (!inputFiles.value[0]) return;
+    const name = inputFiles.value[0].name;
+    const totalSize = inputFiles.value.reduce((a, b) => a + b.size, 0);
+    
+    if (count === 1) {
+        log(`UI: 已选择文件 ${name} (${formatSize(totalSize)})`);
+    } else {
+        log(`UI: 已选择 ${count} 个文件/文件夹, 总大小 ${formatSize(totalSize)}`);
+    }
+  } else {
+    log(`UI: 没有选择文件`)
   }
-}
+};
 
 const handleSendClick = async () => {
-  if (!inputFile.value) return;
+  if (inputFiles.value.length === 0) return;
   try {
-    await sendFile(inputFile.value);
-    notify('success', '文件发送成功');
+    await sendFiles(inputFiles.value);
+    notify('success', '发送成功');
   } catch (e) {
-    notify('error', '发送失败，请查看日志');
+    notify('error', '发送失败');
   }
 };
 
@@ -287,28 +299,54 @@ const MessageRegister = {
                                     <n-space justify="space-between" align="center">
                                         <span>保存方式:</span>
                                         <n-space>
-                                            <n-tag checkable :checked="saverMethod === 'StreamSaver'" @click="saverMethod='StreamSaver'">直接下载 (推荐)</n-tag>
-                                            <n-tag checkable :checked="saverMethod === 'blob'" @click="saverMethod='blob'">内存缓存 (兼容)</n-tag>
+                                            <n-tag checkable :checked="saverMethod === 'StreamSaver'" @click="saverMethod='StreamSaver'" :disabled="transferStatus.startsWith('正在下载')">直接下载 (推荐)</n-tag>
+                                            <n-tag checkable :checked="saverMethod === 'blob'" @click="saverMethod='blob'" :disabled="transferStatus.startsWith('正在下载')">内存缓存 (兼容)</n-tag>
                                         </n-space>
                                     </n-space>
                                 </n-gi>
 
                                 <n-gi>
-                                    <input type="file" ref="fileInputRef" style="display: none" @change="onFileInputChange" />
-                                    <n-card class="drop-zone" :class="{ 'has-file': !!inputFile }" @click="triggerFileSelect">
+                                    <input 
+                                        type="file" 
+                                        multiple 
+                                        ref="fileInputRef" 
+                                        style="display: none" 
+                                        @change="onFileInputChange" 
+                                    />
+                                    
+                                    <input 
+                                        type="file" 
+                                        webkitdirectory 
+                                        ref="folderInputRef" 
+                                        style="display: none" 
+                                        @change="onFileInputChange" 
+                                    />
+
+                                    <n-card class="drop-zone" :class="{ 'has-file': inputFiles.length > 0 }">
                                       <n-space vertical align="center">
                                           <n-icon size="40" color="#888">
                                               <document-attach-outline />
                                           </n-icon>
-                                          <div v-if="!inputFile" style="color: #666">点击选择文件</div>
-
-                                          <div v-else style="max-width: 100%; overflow: hidden; text-align: center; padding: 0 10px;">
-                                              <div style="font-weight: bold; font-size: 1.1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                                                  {{ inputFile.name }}
-                                              </div>
-                                              <div style="font-size: 0.9em; color: #888">{{ formatSize(inputFile.size) }}</div>
+                                          <div v-if="inputFiles.length === 0">
+                                              <n-space>
+                                                  <n-button dashed size="small" @click="triggerFileSelect">选择文件 (可多选)</n-button>
+                                                  <n-button dashed size="small" @click="triggerFolderSelect">选择文件夹</n-button>
+                                              </n-space>
                                           </div>
-                                          </n-space>
+
+                                          <div v-else style="text-align: center;">
+                                            <div style="font-weight: bold; font-size: 1.1em;">
+                                                <span v-if="inputFiles.length === 1">{{ inputFiles[0]!.name }}</span>
+                                                <span v-else>已选择 {{ inputFiles.length }} 个文件</span>
+                                            </div>
+                                            <div style="font-size: 0.9em; color: #888">
+                                                总大小: {{ formatSize(inputFiles.reduce((a,b)=>a+b.size, 0)) }}
+                                            </div>
+                                            <n-button text type="error" size="tiny" @click="inputFiles = []" style="margin-top:5px">
+                                                清除重新选择
+                                            </n-button>
+                                        </div>
+                                    </n-space>
                                   </n-card>
                                 </n-gi>
 
@@ -317,10 +355,10 @@ const MessageRegister = {
                                         type="success"
                                         block
                                         size="large"
-                                        :disabled="!inputFile || transferStatus.includes('发送中')"
+                                        :disabled="inputFiles.length === 0 || transferStatus.includes('发送中')"
                                         @click="handleSendClick"
                                     >
-                                        <template #icon><n-icon><cloud-upload-outline /></n-icon></template>
+                                    <template #icon><n-icon><cloud-upload-outline /></n-icon></template>
                                         开始传输
                                     </n-button>
                                 </n-gi>
