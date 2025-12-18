@@ -248,6 +248,8 @@ export function useRoomConnection() {
       pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
     } else if (msg.type === 'session_token') {
       sessionTicket.value = msg.content;
+    } else if (msg.type === 'rtc_config') {
+      rtcConfig.value.iceServers = JSON.parse(msg.data).iceServers;
     }
   };
   
@@ -257,8 +259,8 @@ export function useRoomConnection() {
     onChannelOpened = fn;
   };
   
-  const connectSocket = (id: string, authData: {isRetry?: boolean, token?: string}) => {
-    const {isRetry, token} = authData
+  const connectSocket = (id: string, authData: {isRetry?: boolean, token?: string, useTURN?: boolean}) => {
+    const {isRetry, token, useTURN} = authData
 
     if ((isJoining.value || isConnected.value) && !isRetry) return;
     
@@ -284,6 +286,9 @@ export function useRoomConnection() {
         log('正在使用 Session Ticket 尝试重连...');
     } else if (token) {
         queryParams += `&token=${encodeURIComponent(token)}`;
+        if (useTURN) {
+          queryParams += `&turn=true`;
+        }
     } else {
         log('缺少验证凭据，无法连接');
         return;
@@ -375,8 +380,7 @@ export function useRoomConnection() {
   
   return {
     roomId, isConnected, isJoining, p2pStatus, myRole, logs,
-    isPendingApproval, pendingGuest,
-    rtcConfig, password,
+    isPendingApproval, pendingGuest, password,
     connectSocket, leaveRoom,
     approveGuest, rejectGuest,
     log, setDataChannelCallback

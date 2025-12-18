@@ -81,9 +81,10 @@ new_classes = ["SignalingDurableObject"]
 **设置环境密钥 (Secrets)**
 
 ```bash
-wrangler secret put TURN_KEY_ID         # 你的 TURN Server Key ID
-wrangler secret put TURN_KEY_API_TOKEN  # 你的 TURN Server API Token
-wrangler secret put TURNSTILE_SECRET_KEY # 你的 Turnstile Secret Key
+wrangler secret put TURN_KEY_ID         # 输入你的 TURN Server Key ID
+wrangler secret put TURN_KEY_API_TOKEN  # 输入你的 TURN Server API Token
+wrangler secret put TURNSTILE_SECRET_KEY # 输入你的 Turnstile Secret Key
+wrangler secret put JWT_SECRET_KEY      # 输入用于JWT的密钥
 ```
 
 **部署**
@@ -97,13 +98,10 @@ wrangler deploy
 
 在根目录下新建 `.env`，添加以下硬编码的配置：
 
-1. **Worker 地址**:
-
-`VITE_WORKER_HOST=<你的Worker地址>`
-
-1. **Turnstile Site Key**:
-
-`VITE_TURNSTILE_SITE_KEY=<你的 Turnstile Site Key>`
+```
+VITE_WORKER_HOST=<你的Worker地址>
+VITE_TURNSTILE_SITE_KEY=<你的 Turnstile Site Key>
+```
 
 **安装依赖并运行:**
 

@@ -39,6 +39,12 @@ export default {
 			const token = url.searchParams.get('token');
 			const ticket = url.searchParams.get('ticket');
 
+			let rtcConfig = ''
+
+			if (url.searchParams.get('turn') !== null) {
+				rtcConfig = await this.generateIceServers(env);
+			}
+
 			let jwtoken = ''
 
 			// 人机验证
@@ -78,6 +84,7 @@ export default {
 					headers: {
 						"User-Agent": request.headers.get('User-Agent')??'',
 						"session-token": jwtoken,
+						"rtc-config": rtcConfig,
 						"Upgrade": 'websocket'
 					}
 				})
@@ -85,33 +92,26 @@ export default {
 			return stub.fetch(dummyRequest);
 		}
 
-		if (url.pathname === "/api/turn" && request.method === "POST") {
-			// --- 获取Cloudflare TURN ---
-			const endpoint = `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`;
-			
-			const cfResponse = await fetch(endpoint, {
-				method: "POST",
-				headers: {
-					"Authorization": `Bearer ${env.TURN_KEY_API_TOKEN}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					ttl: 7200, // 凭证有效期 2 小时
-				}),
-			});
-
-			const data = await cfResponse.json();
-			
-			// 透传给前端
-			return new Response(JSON.stringify(data), {
-				headers: { 
-					"Content-Type": "application/json",
-					"Access-Control-Allow-Origin": "*" // 前后端分离可能需要 CORS
-				},
-			});
-		}
-
 		return new Response("Not found", { status: 404 });
+	},
+
+	async generateIceServers(env: Env) {
+		const endpoint = `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`;
+		
+		const cfResponse = await fetch(endpoint, {
+			method: "POST",
+			headers: {
+				"Authorization": `Bearer ${env.TURN_KEY_API_TOKEN}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				ttl: 7200, // 凭证有效期 2 小时
+			}),
+		});
+
+		const data = await cfResponse.json();
+		
+		return JSON.stringify(data);
 	},
 	
 	async turnstileCheck(request: Request, env: Env, token: string): Promise<checkResult> {
@@ -192,6 +192,11 @@ export class SignalingDurableObject extends DurableObject {
 			}
 		}
 
+		webSocket.send(JSON.stringify({ 
+			type: 'role', 
+			role: isHost ? 'host' : 'guest' 
+		}));
+
 		if (request.headers.has('session-token')) {
 			webSocket.send(JSON.stringify({
 				type: 'session_token',
@@ -199,10 +204,12 @@ export class SignalingDurableObject extends DurableObject {
 			}))
 		}
 
-		webSocket.send(JSON.stringify({ 
-			type: 'role', 
-			role: isHost ? 'host' : 'guest' 
-		}));
+		if (request.headers.get('rtc-config')) {
+			webSocket.send(JSON.stringify({
+				type: 'rtc_config',
+				data: request.headers.get('rtc-config') 
+			}))
+		}
 
 		const ua = request.headers.get('User-Agent') || 'unknown';
 		this.uaParser.setUA(ua)

@@ -17,7 +17,7 @@ import { formatSize } from './utils';
 
 const {
   roomId, isConnected, isJoining, p2pStatus, myRole, logs,
-  isPendingApproval, pendingGuest, rtcConfig, password,
+  isPendingApproval, pendingGuest, password,
   connectSocket, leaveRoom, 
   approveGuest, rejectGuest, 
   log, setDataChannelCallback
@@ -121,35 +121,9 @@ const handleJoinRoom = async () => {
       return; 
   }
 
-  // 1. 处理 TURN 配置 (如果开启)
-  if (useTurnServer.value) {
-    try {
-      log('正在获取 TURN 凭证...');
-      const res = await fetch('/api/turn', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (!res.ok) throw new Error('验证失败');
-      const data = await res.json();
-      
-      // 更新 Composable 中的配置
-      if (data.iceServers) {
-        rtcConfig.value.iceServers = data.iceServers;
-        log('✅ TURN 凭证获取成功');
-      }
-    } catch (e) {
-      notify('error', '获取 TURN 凭证失败，将尝试直连');
-      turnstileToken.value = ''; // 重置验证码
-    }
-  } else {
-    // 强制使用默认 STUN
-    rtcConfig.value.iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
-    log('⚠️ 已禁用 TURN 中继，仅使用 STUN');
-  }
-
   // 2. 发起连接
   try {
-    connectSocket(roomId.value, {token: turnstileToken.value});
+    connectSocket(roomId.value, {token: turnstileToken.value, useTURN: useTurnServer.value});
     notify('info', '正在连接服务器...');
   } catch (e) {
     notify('error', '连接失败');
