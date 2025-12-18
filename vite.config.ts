@@ -26,13 +26,15 @@ export default defineConfig({
 		rollupOptions: {
 			output: {
 				manualChunks(id) {
-					if (id.includes('naive-ui')) {
-						return 'naive-ui';
+					if (id.includes('node_modules')) {
+						if (id.includes('naive-ui')) {
+							return 'naive-ui';
+						}
+						if (id.includes('streamsaver')) {
+							return 'streamsaver';
+						}
+						return 'vendor';
 					}
-					if (id.includes('streamsaver')) {
-						return 'streamsaver';
-					}
-					return 'vendor';
 				}
 			}
 		}
