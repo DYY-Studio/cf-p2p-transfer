@@ -116,18 +116,18 @@ const handleJoinRoom = async () => {
     return;
   }
 
+  if (!turnstileToken.value) {
+      notify('warning', '正在进行人机验证，请稍候...');
+      return; 
+  }
+
   // 1. 处理 TURN 配置 (如果开启)
   if (useTurnServer.value) {
-    if (!turnstileToken.value) {
-      notify('warning', "请等待人机验证完成");
-      return;
-    }
     try {
       log('正在获取 TURN 凭证...');
       const res = await fetch('/api/turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: turnstileToken.value })
       });
       if (!res.ok) throw new Error('验证失败');
       const data = await res.json();
@@ -149,7 +149,7 @@ const handleJoinRoom = async () => {
 
   // 2. 发起连接
   try {
-    connectSocket(roomId.value);
+    connectSocket(roomId.value, {token: turnstileToken.value});
     notify('info', '正在连接服务器...');
   } catch (e) {
     notify('error', '连接失败');
@@ -263,7 +263,7 @@ const MessageRegister = {
                     block 
                     size="large" 
                     :loading="isJoining && activeTab === 'join'"
-                    :disabled="isConnected"
+                    :disabled="isConnected || !turnstileToken"
                     @click="handleJoinRoom"
                   >
                   <template #icon><n-icon><log-in-outline /></n-icon></template>
@@ -272,7 +272,7 @@ const MessageRegister = {
                 </n-space>
               </n-tab-pane>
             
-              <n-tab-pane name="create" tab="创建新房间" :disabled="isConnected || isJoining">
+              <n-tab-pane name="create" tab="创建新房间" :disabled="isConnected || isJoining || !turnstileToken">
                 <n-space vertical size="large" style="padding-top: 10px; text-align: center;">
                   <div style="display: flex; justify-content: space-between; align-items: center;">
                     <n-space align="center">
@@ -287,7 +287,7 @@ const MessageRegister = {
                     block 
                     size="large" 
                     :loading="isJoining && activeTab === 'create'"
-                    :disabled="isConnected"
+                    :disabled="isConnected || !turnstileToken"
                     @click="createAndJoin"
                   >
                   <template #icon><n-icon><refresh /></n-icon></template>
@@ -310,7 +310,7 @@ const MessageRegister = {
             <n-switch v-model:value="useTurnServer" :disabled="isConnected || isJoining" />
           </div>
           
-          <div v-if="useTurnServer && !isConnected && !turnstileToken" class="turnstile-container">
+          <div v-if="!isConnected && !turnstileToken" class="turnstile-container">
             <vue-turnstile
             :site-key="siteKey"
             :model-value="turnstileToken"

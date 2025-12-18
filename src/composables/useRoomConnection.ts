@@ -16,6 +16,7 @@ export function useRoomConnection() {
   const myRole = ref<'host' | 'guest' | ''>('');
   const logs = ref<string>('');
   const password = ref('');
+  const sessionTicket = ref('');
   
   // 待处理的访客 (Host专用)
   const isPendingApproval = ref(false);
@@ -245,6 +246,8 @@ export function useRoomConnection() {
       handleSignalingMessage(msg);
     } else if (msg.type === 'join_request') {
       pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
+    } else if (msg.type === 'session_token') {
+      sessionTicket.value = msg.content;
     }
   };
   
@@ -254,7 +257,9 @@ export function useRoomConnection() {
     onChannelOpened = fn;
   };
   
-  const connectSocket = (id: string, isRetry: boolean = false) => {
+  const connectSocket = (id: string, authData: {isRetry?: boolean, token?: string}) => {
+    const {isRetry, token} = authData
+
     if ((isJoining.value || isConnected.value) && !isRetry) return;
     
     if (!isRetry) {
@@ -271,8 +276,20 @@ export function useRoomConnection() {
       socket.onclose = null;
       socket.close();
     }
+
+    let queryParams = `id=${id}`;
+
+    if (isRetry && sessionTicket.value) {
+        queryParams += `&ticket=${encodeURIComponent(sessionTicket.value)}`;
+        log('正在使用 Session Ticket 尝试重连...');
+    } else if (token) {
+        queryParams += `&token=${encodeURIComponent(token)}`;
+    } else {
+        log('缺少验证凭据，无法连接');
+        return;
+    }
     
-    socket = new WebSocket(`${wsProtocol}//${WORKER_HOST}/api/room?id=${id}`);
+    socket = new WebSocket(`${wsProtocol}//${WORKER_HOST}/api/room?${queryParams}`);
     
     socket.onopen = () => {
       isConnected.value = true;
@@ -314,7 +331,7 @@ export function useRoomConnection() {
     
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
-      connectSocket(roomId.value, true);
+      connectSocket(roomId.value, {isRetry: true});
     }, delay);
   };
   

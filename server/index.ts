@@ -1,14 +1,22 @@
 import { DurableObject } from "cloudflare:workers";
 import { UAParser } from 'ua-parser-js';
+import jwt from "@tsndr/cloudflare-worker-jwt"
 
 export interface Env {
 	SIGNALING_DO: DurableObjectNamespace;
 	TURN_KEY_ID: string;
 	TURN_KEY_API_TOKEN: string;
 	TURNSTILE_SECRET_KEY: string;
+	JWT_SECRET_KEY: string;
+}
+
+type checkResult = {
+	status: number,
+	reason: string		
 }
 
 export default {
+
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		
@@ -23,52 +31,61 @@ export default {
 			if (!roomId) {
 				return new Response("Must pass a Room ID", { status: 400 })
 			}
+
+			// 获取人机验证Token或者JWT，二者必有其一，否则报错
+			if (!url.searchParams.has('token') && !url.searchParams.has('ticket')) {
+				return new Response("Must pass either token or ticket", { status: 400 });
+			}
+			const token = url.searchParams.get('token');
+			const ticket = url.searchParams.get('ticket');
+
+			let jwtoken = ''
+
+			// 人机验证
+			if (token) {
+				const result = await this.turnstileCheck(request, env, token);
+				if (result.status !== 200) {
+					return new Response(result.reason, { status: result.status });
+				} else {
+					const jwt_nbf = Math.floor(Date.now() / 1000);
+					const jwt_exp = Math.floor(Date.now() / 1000) + (2 * (60 * 60));
+
+					jwtoken = await jwt.sign({
+						jti: roomId,
+						nbf: jwt_nbf,
+						exp: jwt_exp
+					}, env.JWT_SECRET_KEY);
+				}
+			} else if (ticket) {
+				const decoded = await jwt.verify(ticket, env.JWT_SECRET_KEY);
+
+				if (!decoded) {
+					return new Response("Invalid Ticket", { status: 403 });
+				}
+				if (!decoded.payload.jti || decoded.payload.jti !== roomId) {
+					return new Response("Invalid Ticket", { status: 403 });
+				}
+			}
 			
 			// 获取 Durable Object ID
 			const id = env.SIGNALING_DO.idFromName(roomId);
 			const stub = env.SIGNALING_DO.get(id);
 
 			// 将请求转交给 Durable Object
-			return stub.fetch(request);
+			let dummyRequest = request;
+			if (jwtoken) {
+				dummyRequest = new Request(url, {
+					headers: {
+						"User-Agent": request.headers.get('User-Agent')??'',
+						"session-token": jwtoken,
+						"Upgrade": 'websocket'
+					}
+				})
+			}
+			return stub.fetch(dummyRequest);
 		}
 
 		if (url.pathname === "/api/turn" && request.method === "POST") {
-			let clientToken = "";
-
-			// --- Cloudflare 人机验证部分 ---
-      
-			try {
-				const body = await request.json() as any;
-				clientToken = body.token;
-			} catch (e) {
-				return new Response("Missing JSON body", { status: 400 });
-			}
-
-			if (!clientToken) {
-				return new Response("Missing Turnstile token", { status: 403 });
-			}
-
-			const ip = request.headers.get("CF-Connecting-IP");
-
-			const formData = new FormData();
-			formData.append("secret", env.TURNSTILE_SECRET_KEY);
-			formData.append("response", clientToken);
-			if (ip) formData.append("remoteip", ip);
-
-			const verifyUrl = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
-			const verifyRes = await fetch(verifyUrl, {
-				method: "POST",
-				body: formData,
-			});
-
-			const verifyResult = await verifyRes.json() as any;
-
-			if (!verifyResult.success) {
-				console.log("Turnstile validation failed:", verifyResult);
-				return new Response("Invalid Captcha", { status: 403 });
-			}
-
-
 			// --- 获取Cloudflare TURN ---
 			const endpoint = `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`;
 			
@@ -79,7 +96,7 @@ export default {
 					"Content-Type": "application/json",
 				},
 				body: JSON.stringify({
-					ttl: 86400, // 凭证有效期 24 小时
+					ttl: 7200, // 凭证有效期 2 小时
 				}),
 			});
 
@@ -96,6 +113,35 @@ export default {
 
 		return new Response("Not found", { status: 404 });
 	},
+	
+	async turnstileCheck(request: Request, env: Env, token: string): Promise<checkResult> {
+		let clientToken = token;
+
+		if (!clientToken) {
+			return { reason: "Missing Turnstile token",  status: 403 };
+		}
+
+		const ip = request.headers.get("CF-Connecting-IP");
+
+		const formData = new FormData();
+		formData.append("secret", env.TURNSTILE_SECRET_KEY);
+		formData.append("response", clientToken);
+		if (ip) formData.append("remoteip", ip);
+
+		const verifyUrl = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+		const verifyRes = await fetch(verifyUrl, {
+			method: "POST",
+			body: formData,
+		});
+
+		const verifyResult = await verifyRes.json() as any;
+
+		if (!verifyResult.success) {
+			console.log("Turnstile validation failed:", verifyResult);
+			return { reason: "Invalid Captcha", status: 403 };
+		}
+		return { reason: 'OK', status: 200 }
+	}
 };
 
 type SignalMessage = {
@@ -144,6 +190,13 @@ export class SignalingDurableObject extends DurableObject {
 			if (currAlarm) { 
 				await this.ctx.storage.deleteAlarm();
 			}
+		}
+
+		if (request.headers.has('session-token')) {
+			webSocket.send(JSON.stringify({
+				type: 'session_token',
+				content: request.headers.get('session-token')
+			}))
 		}
 
 		webSocket.send(JSON.stringify({ 
