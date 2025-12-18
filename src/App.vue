@@ -5,7 +5,7 @@ import VueTurnstile from 'vue-turnstile';
 import {
   NConfigProvider, NGlobalStyle, NCard, NInput, NButton, NSpace,
   NProgress, NTag, NLog, NModal, NGrid, NGi, NSwitch, NTooltip, NIcon,
-  useOsTheme, darkTheme, NMessageProvider, useMessage, NAlert, NDivider
+  useOsTheme, darkTheme, NMessageProvider, useMessage, NAlert, NDivider, NTabs, NTabPane
 } from 'naive-ui';
 import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh } from '@vicons/ionicons5';
 
@@ -29,6 +29,7 @@ const logs = ref<string>('');
 const saverMethod = ref('StreamSaver');
 const inputFile = ref<File | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const activeTab = ref('join');
 
 const storedTurn = localStorage.getItem('useTurnServer');
 const useTurnServer = ref(storedTurn === 'false');
@@ -130,8 +131,21 @@ const fetchTurnCredentials = async () => {
   }
 };
 
+const createAndJoin = () => {
+    const randomId = Math.floor(100000 + Math.random() * 900000).toString();
+    roomId.value = randomId;
+    
+    joinRoom();
+};
+
 const joinRoom = async () => {
   if (isJoining.value || isConnected.value) return;
+
+  if (!roomId.value || roomId.value.length < 4) {
+      notify('warning', '请输入有效的房间号');
+      return;
+  }
+
   isJoining.value = true;
 
   try {
@@ -211,16 +225,36 @@ const setupPeerConnection = () => {
 
 const handleSocketMessage = (msg: any) => {
     if (msg.type === 'role') {
-        myRole.value = msg.role;
-        log(`角色分配: ${msg.role === 'host' ? '房主' : '访客'}`);
-        if (msg.role === 'guest') {
-            isPendingApproval.value = true;
-            socket?.send(JSON.stringify({ type: 'join_request' }));
-            log('已发送入房申请...');
+
+      if (activeTab.value === 'join' && msg.role === 'host') {
+        notify('error', `房间 #${roomId.value} 不存在或对方已离线`);
+        log('尝试加入不存在的房间，已自动断开');
+        
+        socket?.close();
+        isConnected.value = false;
+        isJoining.value = false;
+        return;
+      }
+
+      myRole.value = msg.role;
+      log(`角色分配: ${msg.role === 'host' ? '房主' : '访客'}`);
+
+      if (msg.role === 'guest') {
+
+        isPendingApproval.value = true;
+        socket?.send(JSON.stringify({ type: 'join_request' }));
+        log('已发送入房申请...');
+
+      } else {
+
+        if (activeTab.value === 'create') {
+          notify('success', `房间 #${roomId.value} 创建成功，等待对方加入`);
         } else {
           notify("info", '你是本房间的房主！')
-          isConnected.value = true;
         }
+        isConnected.value = true;
+
+      }
     }
     else if (msg.type === 'join_request') {
         pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
@@ -475,47 +509,68 @@ const MessageRegister = {
                 </template>
 
                 <n-space vertical size="large">
+                    <n-input 
+                        v-model:value="roomId" 
+                        placeholder="输入对方提供的房间号" 
+                        size="large"
+                        :disabled="isConnected || isJoining || activeTab !== 'join'"
+                        @keydown.enter="joinRoom"
+                    >
+                        <template #prefix>#</template>
+                    </n-input>
+
                     <div class="section">
-                        <n-grid x-gap="12" :cols="2">
-                            <n-gi :span="2">
-                                <n-input
-                                    v-model:value="roomId"
-                                    placeholder="请输入房间号 (例如 1234)"
-                                    size="large"
-                                    :disabled="isConnected || isJoining"
-                                >
-                                    <template #prefix>#</template>
-                                </n-input>
-                            </n-gi>
-                        </n-grid>
 
-                        <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
-                            <n-space align="center">
-                                <span style="font-size: 0.9em; color: #666">启用穿透中继 (TURN)</span>
-                                <n-tooltip trigger="hover">
-                                    <template #trigger><n-icon size="16" color="#999"><help-circle-outline /></n-icon> </template>
-                                    开启后可穿透复杂网络，但需要人机验证并启用Cloudflare TURN服务器。
-                                </n-tooltip>
-                            </n-space>
-                            
-                            <n-switch v-model:value="useTurnServer" :disabled="isConnected" />
-                        </div>
+                        <n-tabs type="segment" animated v-model:value="activeTab" :disabled="isConnected">
+        
+                          <n-tab-pane name="join" tab="加入房间">
+                              <n-space vertical size="large" style="padding-top: 10px">
+                                  <n-button 
+                                      type="primary" 
+                                      block 
+                                      size="large" 
+                                      :loading="isJoining && activeTab === 'join'"
+                                      :disabled="isConnected"
+                                      @click="joinRoom"
+                                  >
+                                      <template #icon><n-icon><log-in-outline /></n-icon></template>
+                                      加入房间
+                                  </n-button>
+                              </n-space>
+                          </n-tab-pane>
 
-                        <div style="margin-top: 15px">
-                            <n-button
-                                type="primary"
-                                block
-                                size="large"
-                                :loading="isJoining"
-                                :disabled="isConnected"
-                                @click="joinRoom"
-                            >
-                                <template #icon>
-                                    <n-icon><log-in-outline /></n-icon>
-                                </template>
-                                {{ isConnected ? '已在房间中' : '加入 / 创建房间' }}
-                            </n-button>
-                        </div>
+                          <n-tab-pane name="create" tab="创建新房间">
+                              <n-space vertical size="large" style="padding-top: 10px; text-align: center;">
+                                  <div style="color: #666; font-size: 0.9em; margin-bottom: 5px;">
+                                      将为您生成一个随机的 6 位房间号
+                                  </div>
+                                  
+                                  <n-button 
+                                      type="success" 
+                                      block 
+                                      size="large" 
+                                      :loading="isJoining && activeTab === 'create'"
+                                      :disabled="isConnected"
+                                      @click="createAndJoin"
+                                  >
+                                      <template #icon><n-icon><refresh /></n-icon></template>
+                                      生成并连接
+                                  </n-button>
+                              </n-space>
+                          </n-tab-pane>
+                      </n-tabs>
+                    </div>
+
+                    <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+                        <n-space align="center">
+                            <span style="font-size: 0.9em; color: #666">启用穿透中继 (TURN)</span>
+                            <n-tooltip trigger="hover">
+                                <template #trigger><n-icon size="16" color="#999"><help-circle-outline /></n-icon> </template>
+                                开启后可穿透复杂网络，但需要人机验证并启用Cloudflare TURN服务器。
+                            </n-tooltip>
+                        </n-space>
+                        
+                        <n-switch v-model:value="useTurnServer" :disabled="isConnected" />
                     </div>
 
                     <div v-if="useTurnServer && !isConnected && !turnstileToken" class="turnstile-container">
