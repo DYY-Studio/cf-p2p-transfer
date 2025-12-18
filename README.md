@@ -95,12 +95,15 @@ wrangler deploy
 
 ### 4. 前端配置及部署
 
-打开 `App.vue` (或配置文件)，修改以下硬编码的配置：
+在根目录下新建 `.env`，添加以下硬编码的配置：
 
 1. **Worker 地址**:
-找到 `const workerHost = 'file-sharing.yyfll.eu.org';`，将其修改为你刚才部署的 Worker 域名。
+
+`VITE_WORKER_HOST = 'https://<你的Worker地址>';`
+
 2. **Turnstile Site Key**:
-找到 `const siteKey = '...';`，将其修改为你自己的 Turnstile Site Key。
+
+`VITE_TURNSTILE_SITE_KEY = '<你的 Turnstile Site Key>'`
 
 **安装依赖并运行:**
 
