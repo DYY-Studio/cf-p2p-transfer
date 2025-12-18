@@ -14,7 +14,7 @@ import { useFileTransfer } from './composables/useFileTransfer';
 const {
   roomId, isConnected, isJoining, p2pStatus, myRole, logs,
   isPendingApproval, pendingGuest, rtcConfig,
-  connectSocket, approveGuest, rejectGuest, log, setDataChannelCallback
+  connectSocket, leaveRoom, approveGuest, rejectGuest, log, setDataChannelCallback
 } = useRoomConnection();
 
 const {
@@ -37,11 +37,28 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 const activeTab = ref('join');
 
 const storedTurn = localStorage.getItem('useTurnServer');
-const useTurnServer = ref(storedTurn === 'false');
+const useTurnServer = ref(storedTurn === 'true');
+
+const storedUseRandomRoomId = localStorage.getItem('useRandomRoomId');
+const useRandomRoomId = ref(storedUseRandomRoomId === 'true');
 
 watch(useTurnServer, (newValue) => {
-    localStorage.setItem('useTurnServer', String(newValue));
+  localStorage.setItem('useTurnServer', String(newValue));
 });
+
+watch(useRandomRoomId, (newValue) => {
+  localStorage.setItem('useRandomRooId', String(newValue))
+})
+
+watch(myRole, (newRole) =>{
+  if (activeTab.value === 'join' && newRole === 'host') {
+    leaveRoom();
+    log('错误：不能加入空房间');
+    notify('error', '不能加入空房间');
+    isConnected.value = false;
+    isJoining.value = false;
+  }
+})
 
 // --- UI 交互状态 ---
 const showLogModal = ref(false); // 移动端日志折叠
@@ -71,8 +88,10 @@ const onTurnstileVerify = (token: string) => {
 };
 
 const createAndJoin = () => {
+  if (useRandomRoomId.value) {
     roomId.value = Math.floor(100000 + Math.random() * 900000).toString();
-    handleJoinRoom();
+  }
+  handleJoinRoom();
 };
 
 const handleJoinRoom = async () => {
@@ -181,7 +200,7 @@ const MessageRegister = {
                         v-model:value="roomId" 
                         placeholder="输入对方提供的房间号" 
                         size="large"
-                        :disabled="isConnected || isJoining || activeTab !== 'join'"
+                        :disabled="isConnected || isJoining || (useRandomRoomId && activeTab !== 'join')"
                         @keydown.enter="handleJoinRoom"
                     >
                         <template #prefix>#</template>
@@ -189,9 +208,9 @@ const MessageRegister = {
 
                     <div class="section">
 
-                        <n-tabs type="segment" animated v-model:value="activeTab" :disabled="isConnected">
+                        <n-tabs type="segment" animated v-model:value="activeTab">
         
-                          <n-tab-pane name="join" tab="加入房间">
+                          <n-tab-pane name="join" tab="加入房间" :disabled="isConnected || isJoining">
                               <n-space vertical size="large" style="padding-top: 10px">
                                   <n-button 
                                       type="primary" 
@@ -207,10 +226,14 @@ const MessageRegister = {
                               </n-space>
                           </n-tab-pane>
 
-                          <n-tab-pane name="create" tab="创建新房间">
+                          <n-tab-pane name="create" tab="创建新房间" :disabled="isConnected || isJoining">
                               <n-space vertical size="large" style="padding-top: 10px; text-align: center;">
-                                  <div style="color: #666; font-size: 0.9em; margin-bottom: 5px;">
-                                      将为您生成一个随机的 6 位房间号
+                                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                                      <n-space align="center">
+                                          <span style="font-size: 0.9em; color: #666">随机生成6位房间号</span>
+                                      </n-space>
+                                      
+                                      <n-switch v-model:value="useRandomRoomId" :disabled="isConnected || isJoining" />
                                   </div>
                                   
                                   <n-button 
@@ -222,7 +245,7 @@ const MessageRegister = {
                                       @click="createAndJoin"
                                   >
                                       <template #icon><n-icon><refresh /></n-icon></template>
-                                      生成并连接
+                                      创建并连接
                                   </n-button>
                               </n-space>
                           </n-tab-pane>
@@ -238,7 +261,7 @@ const MessageRegister = {
                             </n-tooltip>
                         </n-space>
                         
-                        <n-switch v-model:value="useTurnServer" :disabled="isConnected" />
+                        <n-switch v-model:value="useTurnServer" :disabled="isConnected || isJoining" />
                     </div>
 
                     <div v-if="useTurnServer && !isConnected && !turnstileToken" class="turnstile-container">
@@ -257,6 +280,7 @@ const MessageRegister = {
                             <template #header>
                                 P2P 连接状态: {{ p2pStatus.toUpperCase() }}
                             </template>
+                            <strong>你是本房间的{{ myRole.toUpperCase() }}</strong><br/>
                             {{ p2pStatus === 'connected' ? '通道畅通，可以开始高速传输。' : '正在寻找对方或建立穿透...' }}
                         </n-alert>
 
