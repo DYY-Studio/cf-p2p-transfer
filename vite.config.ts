@@ -22,4 +22,19 @@ export default defineConfig({
 			'@': fileURLToPath(new URL('./src', import.meta.url))
 		},
 	},
+	build: {
+		rollupOptions: {
+			output: {
+				manualChunks(id) {
+					if (id.includes('naive-ui')) {
+						return 'naive-ui';
+					}
+					if (id.includes('streamsaver')) {
+						return 'streamsaver';
+					}
+					return 'vendor';
+				}
+			}
+		}
+	}
 })

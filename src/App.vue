@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted, computed, watch } from 'vue';
-import streamSaver from 'streamsaver';
+import { ref, computed, watch } from 'vue';
 import VueTurnstile from 'vue-turnstile';
 import {
   NConfigProvider, NGlobalStyle, NCard, NInput, NButton, NSpace,
@@ -9,24 +8,30 @@ import {
 } from 'naive-ui';
 import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh } from '@vicons/ionicons5';
 
+import { useRoomConnection } from './composables/useRoomConnection';
+import { useFileTransfer } from './composables/useFileTransfer';
+
+const {
+  roomId, isConnected, isJoining, p2pStatus, myRole, logs,
+  isPendingApproval, pendingGuest, rtcConfig,
+  connectSocket, approveGuest, rejectGuest, log, setDataChannelCallback
+} = useRoomConnection();
+
+const {
+  transferProgress, transferStatus, receivedFileUrl, receivedFileName, saverMethod,
+  setupTransferChannel, sendFile
+} = useFileTransfer(log);
+
 // --- UI 主题配置 ---
 const osTheme = useOsTheme();
 const theme = computed(() => (osTheme.value === 'dark' ? darkTheme : null));
 const messageRef = ref<any>(null);
-
-// --- Cloudflare 配置 ---
-const workerHost = 'file-sharing.yyfll.eu.org';
 
 // --- Turnstile 状态 ---
 const turnstileToken = ref('');
 const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
 
 // --- 状态变量 ---
-const roomId = ref('1234');
-const isConnected = ref(false);
-const p2pStatus = ref('disconnected');
-const logs = ref<string>('');
-const saverMethod = ref('StreamSaver');
 const inputFile = ref<File | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const activeTab = ref('join');
@@ -39,50 +44,12 @@ watch(useTurnServer, (newValue) => {
 });
 
 // --- UI 交互状态 ---
-const isJoining = ref(false); // 防止重复点击连接
 const showLogModal = ref(false); // 移动端日志折叠
 
-// --- 文件传输状态 ---
-const transferProgress = ref(0);
-const transferStatus = ref('');
-const receivedFileUrl = ref<string | null>(null);
-const receivedFileName = ref('');
-
-// --- 核心对象 ---
-let socket: WebSocket | null = null;
-let peerConnection: RTCPeerConnection | null = null;
-let dataChannel: RTCDataChannel | null = null;
-const candidateQueue: RTCIceCandidateInit[] = [];
-let isRemoteDescriptionSet = false;
-
-// --- 接收端缓存变量 ---
-let receivedChunks: Blob[] = [];
-let fileWriter: WritableStreamDefaultWriter | null = null;
-let receivingMeta: { name: string; size: number; type: string } | null = null;
-let receivedBytes = 0;
-
-// --- 角色控制变量 ---
-const myRole = ref<'host' | 'guest' | ''>('');
-const isPendingApproval = ref(false);
-const pendingGuest = ref<{ name: string; id: number } | null>(null);
-
-// --- 常量配置 ---
-const CHUNK_SIZE = 16 * 1024;
-const MAX_BUFFERED_AMOUNT = 64 * 1024;
-
-const rtcConfig = ref<RTCConfiguration>({
-  iceServers: [
-    { urls: 'stun:stun.cloudflare.com:3478' },
-  ],
-  bundlePolicy: 'max-bundle',
-  iceTransportPolicy: 'all'
+setDataChannelCallback((channel) => {
+  setupTransferChannel(channel);
+  notify('success', 'P2P 数据通道就绪，可以传输文件了！');
 });
-
-// --- 辅助函数 ---
-const log = (msg: string) => {
-  const time = new Date().toLocaleTimeString();
-  logs.value += `[${time}] ${msg}\n`;
-};
 
 const notify = (type: 'success' | 'error' | 'warning' | 'info', content: string) => {
     if(messageRef.value) {
@@ -103,370 +70,69 @@ const onTurnstileVerify = (token: string) => {
   turnstileToken.value = token;
 };
 
-const fetchTurnCredentials = async () => {
-  if (!turnstileToken.value) {
-    notify('warning', "请等待人机验证完成");
-    throw new Error("Turnstile token missing");
-  }
-
-  log('正在获取 TURN 凭证...');
-  try {
-    const res = await fetch('/api/turn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: turnstileToken.value })
-    });
-
-    if (!res.ok) throw new Error('验证失败或服务器拒绝');
-
-    const data = await res.json();
-    if (data.iceServers) {
-      rtcConfig.value.iceServers = data.iceServers;
-      log('✅ TURN 凭证获取成功');
-    }
-  } catch (e) {
-    log('❌ 获取 TURN 凭证被拒绝');
-    turnstileToken.value = '';
-    throw e;
-  }
-};
-
 const createAndJoin = () => {
-    const randomId = Math.floor(100000 + Math.random() * 900000).toString();
-    roomId.value = randomId;
-    
-    joinRoom();
+    roomId.value = Math.floor(100000 + Math.random() * 900000).toString();
+    handleJoinRoom();
 };
 
-const joinRoom = async () => {
-  if (isJoining.value || isConnected.value) return;
-
+const handleJoinRoom = async () => {
   if (!roomId.value || roomId.value.length < 4) {
-      notify('warning', '请输入有效的房间号');
+    notify('warning', '请输入有效的房间号');
+    return;
+  }
+
+  // 1. 处理 TURN 配置 (如果开启)
+  if (useTurnServer.value) {
+    if (!turnstileToken.value) {
+      notify('warning', "请等待人机验证完成");
       return;
-  }
-
-  isJoining.value = true;
-
-  try {
-    if (useTurnServer.value) {
-        await fetchTurnCredentials();
-    } else {
-        rtcConfig.value.iceServers = [
-            { urls: 'stun:stun.cloudflare.com:3478' }
-        ];
-        log('⚠️ 已禁用 TURN 中继，仅使用 STUN (局域网/直连模式)');
-        turnstileToken.value = '';
     }
-
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-
-    socket = new WebSocket(`${wsProtocol}//${workerHost}/api/room?id=${roomId.value}`);
-
-    socket.onopen = () => {
-      isConnected.value = true;
-      isJoining.value = false;
-      notify('success', '已连接服务器，等待配对...');
-      log('WebSocket 已连接');
-      setupPeerConnection();
-    };
-
-    socket.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
-      handleSocketMessage(msg);
-    };
-
-    socket.onclose = (event) => {
-      isConnected.value = false;
-      isJoining.value = false;
-      p2pStatus.value = 'disconnected';
-      log(`WebSocket 已关闭: ${event.reason}`);
-      notify('error', '连接已断开');
-    }
-
-    socket.onerror = () => {
-      isConnected.value = false;
-      isJoining.value = false;
-      log(`WebSocket 错误`);
-      notify('error', '连接发生错误');
-    }
-  } catch (e) {
-    isJoining.value = false;
-    notify('error', '无法加入房间，请检查网络或验证码');
-  }
-};
-
-const setupPeerConnection = () => {
-  peerConnection = new RTCPeerConnection(rtcConfig.value);
-  isRemoteDescriptionSet = false;
-  candidateQueue.length = 0;
-
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate && socket) {
-      socket.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
-    } else {
-      log('本端 Candidate 收集完毕');
-    }
-  };
-
-  peerConnection.onconnectionstatechange = () => {
-    const state = peerConnection?.connectionState || 'unknown';
-    p2pStatus.value = state;
-    log(`ICE 状态: ${state}`);
-    if (state === 'connected') notify('success', 'P2P 通道已建立！');
-    if (state === 'disconnected' || state === 'failed') notify('error', 'P2P 连接断开');
-  };
-
-  peerConnection.ondatachannel = (event) => {
-    log('收到数据通道请求');
-    setupDataChannel(event.channel);
-  };
-};
-
-const handleSocketMessage = (msg: any) => {
-    if (msg.type === 'role') {
-
-      if (activeTab.value === 'join' && msg.role === 'host') {
-        notify('error', `房间 #${roomId.value} 不存在或对方已离线`);
-        log('尝试加入不存在的房间，已自动断开');
-        
-        socket?.close();
-        isConnected.value = false;
-        isJoining.value = false;
-        return;
+    try {
+      log('正在获取 TURN 凭证...');
+      const res = await fetch('/api/turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: turnstileToken.value })
+      });
+      if (!res.ok) throw new Error('验证失败');
+      const data = await res.json();
+      
+      // 更新 Composable 中的配置
+      if (data.iceServers) {
+        rtcConfig.value.iceServers = data.iceServers;
+        log('✅ TURN 凭证获取成功');
       }
-
-      myRole.value = msg.role;
-      log(`角色分配: ${msg.role === 'host' ? '房主' : '访客'}`);
-
-      if (msg.role === 'guest') {
-
-        isPendingApproval.value = true;
-        socket?.send(JSON.stringify({ type: 'join_request' }));
-        log('已发送入房申请...');
-
-      } else {
-
-        if (activeTab.value === 'create') {
-          notify('success', `房间 #${roomId.value} 创建成功，等待对方加入`);
-        } else {
-          notify("info", '你是本房间的房主！')
-        }
-        isConnected.value = true;
-
-      }
+    } catch (e) {
+      notify('error', '获取 TURN 凭证失败，将尝试直连');
+      turnstileToken.value = ''; // 重置验证码
     }
-    else if (msg.type === 'join_request') {
-        pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
-    }
-    else if (msg.type === 'join_approve') {
-        isPendingApproval.value = false;
-        isConnected.value = true;
-        notify('success', '房主已同意加入！');
-        log('房主同意，建立 P2P 中...');
-    }
-    else if (msg.type === 'join_reject') {
-        notify('error', '房主拒绝了请求');
-        setTimeout(() => location.reload(), 2000);
-    }
-    else {
-        handleSignalingMessage(msg);
-    }
-}
-
-const handleSignalingMessage = async (msg: any) => {
-  if (!peerConnection) return;
-  try {
-    if (msg.type === 'offer') {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-      isRemoteDescriptionSet = true;
-      processCandidateQueue();
-
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      socket?.send(JSON.stringify({ type: 'answer', sdp: answer }));
-
-    } else if (msg.type === 'answer') {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-      isRemoteDescriptionSet = true;
-      processCandidateQueue();
-
-    } else if (msg.type === 'candidate') {
-      if (!msg.candidate) return;
-      if (isRemoteDescriptionSet) {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
-      } else {
-        candidateQueue.push(msg.candidate);
-      }
-    }
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-const processCandidateQueue = async () => {
-  for (const candidate of candidateQueue) {
-    try { await peerConnection?.addIceCandidate(new RTCIceCandidate(candidate)); }
-    catch (e) { console.warn(e); }
-  }
-  candidateQueue.length = 0;
-};
-
-const startCall = async () => {
-  if (!peerConnection) return;
-  dataChannel = peerConnection.createDataChannel("file-transfer");
-  setupDataChannel(dataChannel);
-
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  socket?.send(JSON.stringify({ type: 'offer', sdp: offer }));
-  log('已发送 Offer');
-};
-
-const setupDataChannel = (channel: RTCDataChannel) => {
-  dataChannel = channel;
-  dataChannel.binaryType = 'arraybuffer';
-  channel.onopen = () => {
-    p2pStatus.value = 'connected';
-  };
-
-  if (saverMethod.value === 'blob') {
-     channel.onmessage = handleDataMessageBlobArray;
   } else {
-     channel.onmessage = handleDataMessage;
+    // 强制使用默认 STUN
+    rtcConfig.value.iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    log('⚠️ 已禁用 TURN 中继，仅使用 STUN');
   }
-};
 
-// --- StreamSaver ---
-const handleDataMessage = async (event: MessageEvent) => {
-  const data = event.data;
-  if (typeof data === 'string') {
-    const msg = JSON.parse(data);
-    if (msg.type === 'meta') {
-      log(`⬇️ 开始下载: ${msg.name}`);
-      notify('info', `开始接收: ${msg.name}`);
-
-      receivingMeta = msg;
-      receivedBytes = 0;
-      transferStatus.value = `正在下载: ${msg.name}`;
-      const fileStream = streamSaver.createWriteStream(msg.name, { size: msg.size });
-      fileWriter = fileStream.getWriter();
-
-    } else if (msg.type === 'eof') {
-      if (fileWriter) { await fileWriter.close(); fileWriter = null; }
-      receivingMeta = null;
-      transferStatus.value = '下载完成';
-      notify('success', '文件下载完成');
-      log('⬇️ 文件写入完毕');
-    }
-  } else if (data instanceof ArrayBuffer) {
-    if (!fileWriter || !receivingMeta) return;
-    await fileWriter.write(new Uint8Array(data));
-    receivedBytes += data.byteLength;
-    transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
-  }
-};
-
-// --- Blob ---
-const handleDataMessageBlobArray = (event: MessageEvent) => {
-  const data = event.data;
-  if (typeof data === 'string') {
-    const msg = JSON.parse(data);
-    if (msg.type === 'meta') {
-      receivingMeta = msg;
-      receivedChunks = [];
-      receivedBytes = 0;
-      receivedFileUrl.value = null;
-      transferStatus.value = `正在缓存: ${msg.name}`;
-      log(`⬇️ 开始接收(内存): ${msg.name}`);
-
-    } else if (msg.type === 'eof') {
-      if (!receivingMeta) return;
-      const fileBlob = new Blob(receivedChunks, { type: receivingMeta.type });
-      receivedFileUrl.value = URL.createObjectURL(fileBlob);
-      receivedFileName.value = receivingMeta.name;
-      transferStatus.value = '接收完成';
-      notify('success', '文件准备就绪，请点击下载');
-      receivedChunks = [];
-      receivingMeta = null;
-
-    }
-  } else if (data instanceof ArrayBuffer) {
-    if (!receivingMeta) return;
-    receivedChunks.push(new Blob([data]));
-    receivedBytes += data.byteLength;
-    transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
-
+  // 2. 发起连接
+  try {
+    connectSocket(roomId.value);
+    notify('info', '正在连接服务器...');
+  } catch (e) {
+    notify('error', '连接失败');
   }
 };
 
 const triggerFileSelect = () => {
-    fileInputRef.value?.click();
+  fileInputRef.value?.click();
 }
 
 const onFileInputChange = async (event: Event) => {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
-  if(file) {
-      inputFile.value = file;
-      log(`已选择文件: ${file.name} (${formatSize(file.size)})`);
+  if (file) {
+    inputFile.value = file;
+    log(`已选择文件: ${file.name} (${formatSize(file.size)})`);
   }
 }
-
-const sendFile = async () => {
-  const file = inputFile.value;
-  if (!file || !dataChannel || dataChannel.readyState !== 'open') return;
-
-  transferProgress.value = 0;
-  transferStatus.value = `准备发送: ${file.name}`;
-  notify('info', '开始发送文件...');
-  log(`⬆️ 开始发送: ${file.name}`);
-
-  try {
-      dataChannel.send(JSON.stringify({
-        type: 'meta', name: file.name, size: file.size, mime: file.type
-      }));
-
-      let offset = 0;
-      while (offset < file.size) {
-        while (dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-          await new Promise(resolve => setTimeout(resolve, 10));
-        }
-        const chunk = file.slice(offset, offset + CHUNK_SIZE);
-        const buffer = await chunk.arrayBuffer();
-        dataChannel.send(buffer);
-        offset += CHUNK_SIZE;
-        transferProgress.value = Math.min(100, Math.floor((offset / file.size) * 100));
-        transferStatus.value = "发送中...";
-      }
-
-      while (dataChannel.bufferedAmount > 0) {
-          await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      dataChannel.send(JSON.stringify({ type: 'eof' }));
-
-      transferStatus.value = '发送完成';
-      notify('success', '文件发送成功！');
-      log('⬆️ 发送完毕');
-  } catch(e) {
-      log('发送出错: ' + e);
-      notify('error', '发送过程中断');
-  }
-};
-
-const approveGuest = () => {
-    if (!socket || !pendingGuest.value) return;
-    socket.send(JSON.stringify({ type: 'join_approve', guestId: pendingGuest.value.id }));
-    log(`已允许 ${pendingGuest.value.name} 加入`);
-    pendingGuest.value = null;
-    startCall();
-};
-
-const rejectGuest = () => {
-    if (!socket || !pendingGuest.value) return;
-    socket.send(JSON.stringify({ type: 'join_reject', guestId: pendingGuest.value.id }));
-    pendingGuest.value = null;
-};
 
 const formatSize = (bytes: number) => {
   if (bytes === 0) return '0 B';
@@ -475,13 +141,15 @@ const formatSize = (bytes: number) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-onUnmounted(async () => {
-  if (fileWriter) {
-    try { await fileWriter.abort("User closed page"); } catch (e) { /* ignore */ }
+const handleSendClick = async () => {
+  if (!inputFile.value) return;
+  try {
+    await sendFile(inputFile.value);
+    notify('success', '文件发送成功');
+  } catch (e) {
+    notify('error', '发送失败，请查看日志');
   }
-  socket?.close();
-  peerConnection?.close();
-});
+};
 
 const MessageRegister = {
   setup() {
@@ -514,7 +182,7 @@ const MessageRegister = {
                         placeholder="输入对方提供的房间号" 
                         size="large"
                         :disabled="isConnected || isJoining || activeTab !== 'join'"
-                        @keydown.enter="joinRoom"
+                        @keydown.enter="handleJoinRoom"
                     >
                         <template #prefix>#</template>
                     </n-input>
@@ -531,7 +199,7 @@ const MessageRegister = {
                                       size="large" 
                                       :loading="isJoining && activeTab === 'join'"
                                       :disabled="isConnected"
-                                      @click="joinRoom"
+                                      @click="handleJoinRoom"
                                   >
                                       <template #icon><n-icon><log-in-outline /></n-icon></template>
                                       加入房间
@@ -629,7 +297,7 @@ const MessageRegister = {
                                         block
                                         size="large"
                                         :disabled="!inputFile || transferStatus.includes('发送中')"
-                                        @click="sendFile"
+                                        @click="handleSendClick"
                                     >
                                         <template #icon><n-icon><cloud-upload-outline /></n-icon></template>
                                         开始传输
