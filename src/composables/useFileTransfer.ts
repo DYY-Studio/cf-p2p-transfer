@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import streamSaver from 'streamsaver';
+import { formatSize, formatTime } from '@/utils';
 
 // --- 常量配置 ---
 const CHUNK_SIZE = 16 * 1024; // 16KB 分片
@@ -12,13 +13,17 @@ export function useFileTransfer(log: (msg: string) => void) {
   const receivedFileUrl = ref<string | null>(null); // Blob 模式下的下载链接
   const receivedFileName = ref('');
   const saverMethod = ref<'StreamSaver' | 'blob'>('StreamSaver');
+  const transferSpeed = ref('0 B/s');
+  const timeRemaining = ref('calculating...');
 
   // --- 内部变量 ---
   let fileWriter: WritableStreamDefaultWriter | null = null;
   let receivingMeta: { name: string; size: number; type: string } | null = null;
-  let receivedBytes = 0;
+  let processedBytes = 0;
   let receivedChunks: Blob[] = []; // Blob 模式缓存
   let activeDataChannel: RTCDataChannel | null = null;
+  let speedInterval: any = null;
+  let lastBytes = 0;
 
   // --- 核心逻辑：绑定通道 ---
   const setupTransferChannel = (channel: RTCDataChannel) => {
@@ -35,6 +40,42 @@ export function useFileTransfer(log: (msg: string) => void) {
     };
   };
 
+  const startSpeedTracker = (total: number) => {
+    stopSpeedTracker(); // 防止重复开启
+    processedBytes = 0;
+    lastBytes = 0;
+    let totalBytes = total;
+    transferSpeed.value = '0 B/s';
+    timeRemaining.value = '--';
+
+    speedInterval = setInterval(() => {
+      const currentBytes = processedBytes;
+      const diff = currentBytes - lastBytes;
+      const speedBytesPerSec = diff; // 因为我们每1秒执行一次，所以差值就是 B/s
+      
+      // 1. 更新速度显示
+      transferSpeed.value = formatSize(speedBytesPerSec) + '/s';
+
+      // 2. 更新剩余时间显示
+      if (speedBytesPerSec > 0) {
+        const remaining = totalBytes - currentBytes;
+        const seconds = Math.ceil(remaining / speedBytesPerSec);
+        timeRemaining.value = formatTime(seconds);
+      } else {
+        timeRemaining.value = '--';
+      }
+
+      lastBytes = currentBytes;
+    }, 1000); // 每秒刷新一次
+  };
+
+  const stopSpeedTracker = () => {
+    if (speedInterval) clearInterval(speedInterval);
+    speedInterval = null;
+    transferSpeed.value = ''; // 传输结束清空
+    timeRemaining.value = '';
+  };
+
   // --- 逻辑 A：发送端 (带背压控制) ---
   const sendFile = async (file: File) => {
     if (!activeDataChannel || activeDataChannel.readyState !== 'open') {
@@ -44,6 +85,8 @@ export function useFileTransfer(log: (msg: string) => void) {
     transferProgress.value = 0;
     transferStatus.value = `准备发送: ${file.name}`;
     log(`⬆️ 开始发送: ${file.name}`);
+
+    startSpeedTracker(file.size);
 
     try {
       // 1. 发送元数据
@@ -64,6 +107,8 @@ export function useFileTransfer(log: (msg: string) => void) {
         activeDataChannel.send(buffer);
         
         offset += CHUNK_SIZE;
+
+        processedBytes = offset;
         transferProgress.value = Math.min(100, Math.floor((offset / file.size) * 100));
         transferStatus.value = "发送中...";
       }
@@ -80,6 +125,8 @@ export function useFileTransfer(log: (msg: string) => void) {
       log(`发送出错: ${e}`);
       transferStatus.value = '发送中断';
       throw e;
+    } finally {
+      stopSpeedTracker();
     }
   };
 
@@ -91,21 +138,24 @@ export function useFileTransfer(log: (msg: string) => void) {
       if (msg.type === 'meta') {
         log(`⬇️ 开始下载(Stream): ${msg.name}`);
         receivingMeta = msg;
-        receivedBytes = 0;
+        processedBytes = 0;
         transferStatus.value = `正在下载: ${msg.name}`;
+
+        startSpeedTracker(msg.size);
         
         const fileStream = streamSaver.createWriteStream(msg.name, { size: msg.size });
         fileWriter = fileStream.getWriter();
       } else if (msg.type === 'eof') {
         if (fileWriter) { await fileWriter.close(); fileWriter = null; }
         receivingMeta = null;
+        stopSpeedTracker();
         transferStatus.value = '下载完成';
         log('⬇️ 文件写入完毕');
       }
     } else if (data instanceof ArrayBuffer && fileWriter && receivingMeta) {
       await fileWriter.write(new Uint8Array(data));
-      receivedBytes += data.byteLength;
-      transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
+      processedBytes += data.byteLength;
+      transferProgress.value = Math.floor((processedBytes / receivingMeta.size) * 100);
     }
   };
 
@@ -118,7 +168,9 @@ export function useFileTransfer(log: (msg: string) => void) {
         log(`⬇️ 开始接收(内存): ${msg.name}`);
         receivingMeta = msg;
         receivedChunks = [];
-        receivedBytes = 0;
+        processedBytes = 0;
+        startSpeedTracker(msg.size);
+
         receivedFileUrl.value = null;
         transferStatus.value = `正在缓存: ${msg.name}`;
       } else if (msg.type === 'eof' && receivingMeta) {
@@ -126,23 +178,23 @@ export function useFileTransfer(log: (msg: string) => void) {
         receivedFileUrl.value = URL.createObjectURL(fileBlob);
         receivedFileName.value = receivingMeta.name;
         transferStatus.value = '接收完成';
+
+        stopSpeedTracker();
         receivedChunks = [];
         receivingMeta = null;
       }
     } else if (data instanceof ArrayBuffer && receivingMeta) {
       receivedChunks.push(new Blob([data]));
-      receivedBytes += data.byteLength;
-      transferProgress.value = Math.floor((receivedBytes / receivingMeta.size) * 100);
+      processedBytes += data.byteLength;
+      transferProgress.value = Math.floor((processedBytes / receivingMeta.size) * 100);
     }
   };
 
   return {
-    transferProgress,
-    transferStatus,
-    receivedFileUrl,
-    receivedFileName,
+    transferProgress, transferStatus,
+    receivedFileUrl, receivedFileName,
     saverMethod,
-    setupTransferChannel,
-    sendFile
+    transferSpeed, timeRemaining,
+    setupTransferChannel, sendFile
   };
 }

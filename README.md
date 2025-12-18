@@ -99,11 +99,11 @@ wrangler deploy
 
 1. **Worker 地址**:
 
-`VITE_WORKER_HOST = 'https://<你的Worker地址>';`
+`VITE_WORKER_HOST=<你的Worker地址>`
 
-2. **Turnstile Site Key**:
+1. **Turnstile Site Key**:
 
-`VITE_TURNSTILE_SITE_KEY = '<你的 Turnstile Site Key>'`
+`VITE_TURNSTILE_SITE_KEY=<你的 Turnstile Site Key>`
 
 **安装依赖并运行:**
 

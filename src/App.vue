@@ -6,10 +6,11 @@ import {
   NProgress, NTag, NLog, NModal, NGrid, NGi, NSwitch, NTooltip, NIcon,
   useOsTheme, darkTheme, NMessageProvider, useMessage, NAlert, NDivider, NTabs, NTabPane
 } from 'naive-ui';
-import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh } from '@vicons/ionicons5';
+import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh, FlashOutline } from '@vicons/ionicons5';
 
 import { useRoomConnection } from './composables/useRoomConnection';
 import { useFileTransfer } from './composables/useFileTransfer';
+import { formatSize } from './utils';
 
 const {
   roomId, isConnected, isJoining, p2pStatus, myRole, logs,
@@ -18,7 +19,10 @@ const {
 } = useRoomConnection();
 
 const {
-  transferProgress, transferStatus, receivedFileUrl, receivedFileName, saverMethod,
+  transferProgress, transferStatus, 
+  receivedFileUrl, receivedFileName, 
+  saverMethod,
+  transferSpeed, timeRemaining,
   setupTransferChannel, sendFile
 } = useFileTransfer(log);
 
@@ -152,13 +156,6 @@ const onFileInputChange = async (event: Event) => {
     log(`已选择文件: ${file.name} (${formatSize(file.size)})`);
   }
 }
-
-const formatSize = (bytes: number) => {
-  if (bytes === 0) return '0 B';
-  const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
 
 const handleSendClick = async () => {
   if (!inputFile.value) return;
@@ -333,6 +330,10 @@ const MessageRegister = {
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                                     <span>{{ transferStatus }}</span>
                                 </div>
+                                <span v-if="transferProgress > 0 && transferProgress < 100" style="font-size: 0.9em; color: #666">
+                                    <n-icon style="vertical-align: -2px"><flash-outline /></n-icon> 
+                                    {{ transferSpeed }} · 剩余 {{ timeRemaining }}
+                                </span>
                                 <n-progress
                                     type="line"
                                     :percentage="transferProgress"
