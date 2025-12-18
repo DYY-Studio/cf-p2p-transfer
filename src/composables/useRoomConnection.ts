@@ -1,4 +1,5 @@
 import { ref, onUnmounted } from 'vue';
+import { encryptMsg, decryptMsg } from '@/utils/crypto';
 
 const WORKER_HOST = import.meta.env.VITE_WORKER_HOST;
 
@@ -14,6 +15,7 @@ export function useRoomConnection() {
   const p2pStatus = ref<'disconnected' | 'new' | 'connecting' | 'connected' | 'failed'>('disconnected'); // P2P 状态
   const myRole = ref<'host' | 'guest' | ''>('');
   const logs = ref<string>('');
+  const password = ref('');
   
   // 待处理的访客 (Host专用)
   const isPendingApproval = ref(false);
@@ -23,7 +25,7 @@ export function useRoomConnection() {
   let socket: WebSocket | null = null;
   let peerConnection: RTCPeerConnection | null = null;
   let dataChannel: RTCDataChannel | null = null;
-
+  
   // -- 网络稳定性增强 ---
   let heartbeatTimer: any = null;
   let reconnectTimer: any = null;
@@ -48,7 +50,7 @@ export function useRoomConnection() {
   const log = (msg: string) => {
     logs.value += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
   };
-
+  
   // --- 网络稳定性函数 ---
   const startHeartbeat = () => {
     stopHeartbeat();
@@ -58,13 +60,35 @@ export function useRoomConnection() {
       }
     }, HEARTBEAT_INTERVAL);
   };
-
+  
   const stopHeartbeat = () => {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   };
   
   // --- 核心 WebRTC 逻辑 ---
+  
+  const sendSignalingMessage = async (msg: any) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const envelope: any = { 
+        type: msg.type,
+        guestId: msg.guestId, 
+    };
+
+    if (password.value && msg.type !== 'ping') {
+      try {
+        const encryptedData = await encryptMsg(msg, password.value, roomId.value);
+        envelope.payload = encryptedData;
+      } catch (e) {
+        log(`❌ 加密失败: ${e}`);
+        return;
+      }
+    } else {
+      Object.assign(envelope, msg);
+    }
+    socket.send(JSON.stringify(envelope));
+  };
   
   // 1. 初始化 PeerConnection
   const setupPeerConnection = () => {
@@ -82,7 +106,7 @@ export function useRoomConnection() {
     // 收集本端的 ICE Candidate 并通过 WebSocket 发送给对方
     peerConnection.onicecandidate = (event) => {
       if (event.candidate && socket) {
-        socket.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
+        sendSignalingMessage({ type: 'candidate', candidate: event.candidate });
       }
     };
     
@@ -92,10 +116,10 @@ export function useRoomConnection() {
       // @ts-ignore
       p2pStatus.value = state; 
       log(`ICE 状态变更: ${state}`);
-
+      
       if (state === 'failed' || state === 'disconnected') {
-         log('检测到 P2P 断开，尝试重启...');
-         restartIce();
+        log('检测到 P2P 断开，尝试重启...');
+        restartIce();
       }
     };
     
@@ -106,7 +130,7 @@ export function useRoomConnection() {
       setupDataChannelListeners(dataChannel);
     };
   };
-
+  
   const restartIce = async () => {
     if (!peerConnection || !socket) return;
     // 只有 Host 有权发起重启，Guest 等待 Offer
@@ -135,7 +159,7 @@ export function useRoomConnection() {
         
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        socket?.send(JSON.stringify({ type: 'answer', sdp: answer }));
+        sendSignalingMessage({ type: 'answer', sdp: answer });
         
       } else if (msg.type === 'answer') {
         // 收到 Answer: 设置远端描述
@@ -178,15 +202,31 @@ export function useRoomConnection() {
     };
   };
   // 4. WebSocket 消息路由
-  const handleSocketMessage = (msg: any) => {
-    if (msg.type === 'pong') return;
+  const handleSocketMessage = async (rawMsg: any) => {
+    if (rawMsg.type === 'pong') return;
+
+    let msg = rawMsg;
+
+    if (rawMsg.payload && rawMsg.payload._enc) {
+        if (!password.value) {
+            log('收到加密消息但未设置密码，忽略');
+            return;
+        }
+        try {
+            msg = await decryptMsg(rawMsg.payload, password.value, roomId.value);
+        } catch (e) {
+            log('解密失败：对方密码可能不同');
+            return; 
+        }
+    }
+
     if (msg.type === 'role') {
       myRole.value = msg.role;
       log(`角色分配: ${msg.role}`);
       if (msg.role === 'guest') {
         if (p2pStatus.value !== 'connected') {
           isPendingApproval.value = true;
-          socket?.send(JSON.stringify({ type: 'join_request' }));
+          sendSignalingMessage({ type: 'join_request' });
         } else {
           isConnected.value = true;
         }
@@ -197,14 +237,13 @@ export function useRoomConnection() {
       isPendingApproval.value = false;
       isConnected.value = true;
       log('房主同意，建立 P2P 中...');
-
+      
       if (peerConnection?.connectionState !== 'connected') {
         setupPeerConnection();
       }
     } else if (['offer', 'answer', 'candidate'].includes(msg.type)) {
       handleSignalingMessage(msg);
-    } 
-    else if (msg.type === 'join_request') {
+    } else if (msg.type === 'join_request') {
       pendingGuest.value = { name: msg.deviceName, id: msg.guestId };
     }
   };
@@ -217,7 +256,7 @@ export function useRoomConnection() {
   
   const connectSocket = (id: string, isRetry: boolean = false) => {
     if ((isJoining.value || isConnected.value) && !isRetry) return;
-
+    
     if (!isRetry) {
       isManualClose = false;
       reconnectAttempts = 0;
@@ -227,12 +266,12 @@ export function useRoomConnection() {
     isJoining.value = true;
     
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-
+    
     if (socket) {
       socket.onclose = null;
       socket.close();
     }
-
+    
     socket = new WebSocket(`${wsProtocol}//${WORKER_HOST}/api/room?id=${id}`);
     
     socket.onopen = () => {
@@ -241,7 +280,7 @@ export function useRoomConnection() {
       reconnectAttempts = 0;
       startHeartbeat();
       log('WebSocket 已连接，等待信令...');
-
+      
       if (!peerConnection) setupPeerConnection();
     };
     
@@ -253,7 +292,7 @@ export function useRoomConnection() {
       isConnected.value = false;
       p2pStatus.value = 'disconnected';
       log('WebSocket 断开');
-
+      
       if (!isManualClose) {
         attemptReconnect();
       } else {
@@ -261,18 +300,18 @@ export function useRoomConnection() {
       }
     };
   };
-
+  
   const attemptReconnect = () => {
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       log('达到最大重连次数，停止重连');
       return;
     }
-
+    
     reconnectAttempts++;
-
+    
     const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
     log(`连接断开，${delay / 1000} 秒后尝试第 ${reconnectAttempts} 次重连...`);
-
+    
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
       connectSocket(roomId.value, true);
@@ -286,7 +325,7 @@ export function useRoomConnection() {
     
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
-    socket?.send(JSON.stringify({ type: 'offer', sdp: offer }));
+    sendSignalingMessage({ type: 'offer', sdp: offer });
     log('已发送 Offer');
   };
   
@@ -320,12 +359,9 @@ export function useRoomConnection() {
   return {
     roomId, isConnected, isJoining, p2pStatus, myRole, logs,
     isPendingApproval, pendingGuest,
-    rtcConfig, // 暴露出去以便组件修改 ICE Server
-    connectSocket,
-    leaveRoom,
-    approveGuest,
-    rejectGuest,
-    log,
-    setDataChannelCallback
+    rtcConfig, password,
+    connectSocket, leaveRoom,
+    approveGuest, rejectGuest,
+    log, setDataChannelCallback
   };
 }

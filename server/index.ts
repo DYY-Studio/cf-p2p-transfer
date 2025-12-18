@@ -18,8 +18,11 @@ export default {
 				return new Response("Expected Upgrade: websocket", { status: 426 });
 			}
 
-			// 获取房间号，如果没有则随机生成
-			const roomId = url.searchParams.get("id") || "default-room";
+			// 获取房间号，如果没有就报错
+			const roomId = url.searchParams.get("id");
+			if (!roomId) {
+				return new Response("Must pass a Room ID", { status: 400 })
+			}
 			
 			// 获取 Durable Object ID
 			const id = env.SIGNALING_DO.idFromName(roomId);
@@ -101,7 +104,6 @@ type SignalMessage = {
 };
 
 export class SignalingDurableObject extends DurableObject {
-	// 存储当前房间内的所有 WebSocket 连接
 	sessions: WebSocket[] = [];
 	hostSession: WebSocket | null = null;
 	approvedSessions: Set<WebSocket> = new Set();

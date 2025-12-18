@@ -6,7 +6,10 @@ import {
   NProgress, NTag, NLog, NModal, NGrid, NGi, NSwitch, NTooltip, NIcon,
   useOsTheme, darkTheme, NMessageProvider, useMessage, NAlert, NDivider, NTabs, NTabPane
 } from 'naive-ui';
-import { CloudUploadOutline, CloudDownloadOutline, LogInOutline, DocumentAttachOutline, Refresh, FlashOutline } from '@vicons/ionicons5';
+import { 
+  CloudUploadOutline, CloudDownloadOutline, LogInOutline, 
+  DocumentAttachOutline, Refresh, FlashOutline, LockClosedOutline
+} from '@vicons/ionicons5';
 
 import { useRoomConnection } from './composables/useRoomConnection';
 import { useFileTransfer } from './composables/useFileTransfer';
@@ -14,8 +17,10 @@ import { formatSize } from './utils';
 
 const {
   roomId, isConnected, isJoining, p2pStatus, myRole, logs,
-  isPendingApproval, pendingGuest, rtcConfig,
-  connectSocket, leaveRoom, approveGuest, rejectGuest, log, setDataChannelCallback
+  isPendingApproval, pendingGuest, rtcConfig, password,
+  connectSocket, leaveRoom, 
+  approveGuest, rejectGuest, 
+  log, setDataChannelCallback
 } = useRoomConnection();
 
 const {
@@ -60,6 +65,12 @@ watch(myRole, (newRole) =>{
     leaveRoom();
     log('错误：不能加入空房间');
     notify('error', '不能加入空房间');
+    isConnected.value = false;
+    isJoining.value = false;
+  } else if (activeTab.value === 'create' && newRole === 'guest') {
+    leaveRoom();
+    log('错误：该房间已存在');
+    notify('error', '房间已存在');
     isConnected.value = false;
     isJoining.value = false;
   }
@@ -223,12 +234,22 @@ const MessageRegister = {
           <n-space vertical size="large">
             <n-input 
             v-model:value="roomId" 
-            placeholder="输入对方提供的房间号" 
+            placeholder="房间号" 
             size="large"
             :disabled="isConnected || isJoining || (useRandomRoomId && activeTab !== 'join')"
             @keydown.enter="handleJoinRoom"
             >
             <template #prefix>#</template>
+          </n-input>
+          <n-input
+            v-model:value="password"
+            type="password"
+            show-password-on="click"
+            placeholder="加密密码 (可选)"
+            size="large"
+            :disabled="isConnected || isJoining"
+          >
+            <template #prefix><n-icon><lock-closed-outline /></n-icon></template>
           </n-input>
           
           <div class="section">
