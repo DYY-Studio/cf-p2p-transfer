@@ -29,7 +29,7 @@ const messageRef = ref<any>(null);
 
 // --- Turnstile 状态 ---
 const turnstileToken = ref('');
-const siteKey = '0x4AAAAAACHLVZIn1HqZuXAa';
+const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 
 // --- 状态变量 ---
 const inputFile = ref<File | null>(null);

@@ -1,6 +1,6 @@
 import { ref, onUnmounted } from 'vue';
 
-const WORKER_HOST = 'file-sharing.yyfll.eu.org';
+const WORKER_HOST = import.meta.env.VITE_WORKER_HOST;
 
 export function useRoomConnection() {
   // --- 状态定义 ---
