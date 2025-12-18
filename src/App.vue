@@ -207,245 +207,245 @@ const MessageRegister = {
   <n-config-provider :theme="theme">
     <n-global-style />
     <n-message-provider>
-        <MessageRegister />
-
-        <div class="main-layout">
-            <n-card class="app-card" size="huge" :bordered="false">
-                <template #header>
-                    <div class="header-content">
-                        <h2>CF点对点快传</h2>
-                        <n-tag :type="connectionStateType" round>
-                            {{ connectionStateText }}
-                        </n-tag>
-                    </div>
-                </template>
-
-                <n-space vertical size="large">
-                    <n-input 
-                        v-model:value="roomId" 
-                        placeholder="输入对方提供的房间号" 
-                        size="large"
-                        :disabled="isConnected || isJoining || (useRandomRoomId && activeTab !== 'join')"
-                        @keydown.enter="handleJoinRoom"
-                    >
-                        <template #prefix>#</template>
-                    </n-input>
-
-                    <div class="section">
-
-                        <n-tabs type="segment" animated v-model:value="activeTab">
+      <MessageRegister />
+      
+      <div class="main-layout">
+        <n-card class="app-card" size="huge" :bordered="false">
+          <template #header>
+            <div class="header-content">
+              <h2>CF点对点快传</h2>
+              <n-tag :type="connectionStateType" round>
+                {{ connectionStateText }}
+              </n-tag>
+            </div>
+          </template>
+          
+          <n-space vertical size="large">
+            <n-input 
+            v-model:value="roomId" 
+            placeholder="输入对方提供的房间号" 
+            size="large"
+            :disabled="isConnected || isJoining || (useRandomRoomId && activeTab !== 'join')"
+            @keydown.enter="handleJoinRoom"
+            >
+            <template #prefix>#</template>
+          </n-input>
+          
+          <div class="section">
+            
+            <n-tabs type="segment" animated v-model:value="activeTab">
+              
+              <n-tab-pane name="join" tab="加入房间" :disabled="isConnected || isJoining">
+                <n-space vertical size="large" style="padding-top: 10px">
+                  <n-button 
+                    type="primary" 
+                    block 
+                    size="large" 
+                    :loading="isJoining && activeTab === 'join'"
+                    :disabled="isConnected"
+                    @click="handleJoinRoom"
+                  >
+                  <template #icon><n-icon><log-in-outline /></n-icon></template>
+                  加入房间
+                  </n-button>
+                </n-space>
+              </n-tab-pane>
+            
+              <n-tab-pane name="create" tab="创建新房间" :disabled="isConnected || isJoining">
+                <n-space vertical size="large" style="padding-top: 10px; text-align: center;">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <n-space align="center">
+                      <span style="font-size: 0.9em; color: #666">随机生成6位房间号</span>
+                    </n-space>
+                    
+                    <n-switch v-model:value="useRandomRoomId" :disabled="isConnected || isJoining" />
+                  </div>
+                  
+                  <n-button 
+                    type="success" 
+                    block 
+                    size="large" 
+                    :loading="isJoining && activeTab === 'create'"
+                    :disabled="isConnected"
+                    @click="createAndJoin"
+                  >
+                  <template #icon><n-icon><refresh /></n-icon></template>
+                  创建并连接
+                  </n-button>
+                </n-space>
+              </n-tab-pane>
+            </n-tabs>
+          </div>
         
-                          <n-tab-pane name="join" tab="加入房间" :disabled="isConnected || isJoining">
-                              <n-space vertical size="large" style="padding-top: 10px">
-                                  <n-button 
-                                      type="primary" 
-                                      block 
-                                      size="large" 
-                                      :loading="isJoining && activeTab === 'join'"
-                                      :disabled="isConnected"
-                                      @click="handleJoinRoom"
-                                  >
-                                      <template #icon><n-icon><log-in-outline /></n-icon></template>
-                                      加入房间
-                                  </n-button>
-                              </n-space>
-                          </n-tab-pane>
-
-                          <n-tab-pane name="create" tab="创建新房间" :disabled="isConnected || isJoining">
-                              <n-space vertical size="large" style="padding-top: 10px; text-align: center;">
-                                  <div style="display: flex; justify-content: space-between; align-items: center;">
-                                      <n-space align="center">
-                                          <span style="font-size: 0.9em; color: #666">随机生成6位房间号</span>
-                                      </n-space>
-                                      
-                                      <n-switch v-model:value="useRandomRoomId" :disabled="isConnected || isJoining" />
-                                  </div>
-                                  
-                                  <n-button 
-                                      type="success" 
-                                      block 
-                                      size="large" 
-                                      :loading="isJoining && activeTab === 'create'"
-                                      :disabled="isConnected"
-                                      @click="createAndJoin"
-                                  >
-                                      <template #icon><n-icon><refresh /></n-icon></template>
-                                      创建并连接
-                                  </n-button>
-                              </n-space>
-                          </n-tab-pane>
-                      </n-tabs>
-                    </div>
-
-                    <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
-                        <n-space align="center">
-                            <span style="font-size: 0.9em; color: #666">启用穿透中继 (TURN)</span>
-                            <n-tooltip trigger="hover">
-                                <template #trigger><n-icon size="16" color="#999"><help-circle-outline /></n-icon> </template>
-                                开启后可穿透复杂网络，但需要人机验证并启用Cloudflare TURN服务器。
-                            </n-tooltip>
+          <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center;">
+            <n-space align="center">
+              <span style="font-size: 0.9em; color: #666">启用穿透中继 (TURN)</span>
+              <n-tooltip trigger="hover">
+                <template #trigger><n-icon size="16" color="#999"><help-circle-outline /></n-icon> </template>
+                开启后可穿透复杂网络，但需要人机验证并启用Cloudflare TURN服务器。
+              </n-tooltip>
+            </n-space>
+            
+            <n-switch v-model:value="useTurnServer" :disabled="isConnected || isJoining" />
+          </div>
+          
+          <div v-if="useTurnServer && !isConnected && !turnstileToken" class="turnstile-container">
+            <vue-turnstile
+            :site-key="siteKey"
+            :model-value="turnstileToken"
+            @update:model-value="onTurnstileVerify"
+            @expire="onTurnstileExpire"
+            />
+          </div>
+          
+          <n-divider v-if="isConnected" />
+          
+          <div v-if="isConnected">
+            <n-alert :type="p2pStatus === 'connected' ? 'success' : 'warning'" :show-icon="true">
+              <template #header>
+                P2P 连接状态: {{ p2pStatus.toUpperCase() }}
+              </template>
+              <strong>你是本房间的{{ myRole.toUpperCase() }}</strong><br/>
+              {{ p2pStatus === 'connected' ? '通道畅通，可以开始高速传输。' : '正在寻找对方或建立穿透...' }}
+            </n-alert>
+            
+            <div v-if="p2pStatus === 'connected'" class="transfer-zone">
+              <n-grid :cols="1" y-gap="16">
+                <n-gi>
+                  <n-space justify="space-between" align="center">
+                    <span>保存方式:</span>
+                    <n-space>
+                      <n-tag checkable :checked="saverMethod === 'StreamSaver'" @click="saverMethod='StreamSaver'" :disabled="transferStatus.startsWith('正在下载')">直接下载 (推荐)</n-tag>
+                      <n-tag checkable :checked="saverMethod === 'blob'" @click="saverMethod='blob'" :disabled="transferStatus.startsWith('正在下载')">内存缓存 (兼容)</n-tag>
+                    </n-space>
+                  </n-space>
+                </n-gi>
+                
+                <n-gi>
+                  <input 
+                    type="file" 
+                    multiple 
+                    ref="fileInputRef" 
+                    style="display: none" 
+                    @change="onFileInputChange" 
+                  />
+                  
+                  <input 
+                    type="file" 
+                    webkitdirectory 
+                    ref="folderInputRef" 
+                    style="display: none" 
+                    @change="onFileInputChange" 
+                  />
+                  
+                  <n-card class="drop-zone" :class="{ 'has-file': inputFiles.length > 0 }">
+                    <n-space vertical align="center">
+                      <n-icon size="40" color="#888">
+                        <document-attach-outline />
+                      </n-icon>
+                      <div v-if="inputFiles.length === 0">
+                        <n-space>
+                          <n-button dashed size="small" @click="triggerFileSelect">选择文件 (可多选)</n-button>
+                          <n-button dashed size="small" @click="triggerFolderSelect">选择文件夹</n-button>
                         </n-space>
-                        
-                        <n-switch v-model:value="useTurnServer" :disabled="isConnected || isJoining" />
-                    </div>
-
-                    <div v-if="useTurnServer && !isConnected && !turnstileToken" class="turnstile-container">
-                        <vue-turnstile
-                            :site-key="siteKey"
-                            :model-value="turnstileToken"
-                            @update:model-value="onTurnstileVerify"
-                            @expire="onTurnstileExpire"
-                        />
-                    </div>
-
-                    <n-divider v-if="isConnected" />
-
-                    <div v-if="isConnected">
-                        <n-alert :type="p2pStatus === 'connected' ? 'success' : 'warning'" :show-icon="true">
-                            <template #header>
-                                P2P 连接状态: {{ p2pStatus.toUpperCase() }}
-                            </template>
-                            <strong>你是本房间的{{ myRole.toUpperCase() }}</strong><br/>
-                            {{ p2pStatus === 'connected' ? '通道畅通，可以开始高速传输。' : '正在寻找对方或建立穿透...' }}
-                        </n-alert>
-
-                        <div v-if="p2pStatus === 'connected'" class="transfer-zone">
-                            <n-grid :cols="1" y-gap="16">
-                                <n-gi>
-                                    <n-space justify="space-between" align="center">
-                                        <span>保存方式:</span>
-                                        <n-space>
-                                            <n-tag checkable :checked="saverMethod === 'StreamSaver'" @click="saverMethod='StreamSaver'" :disabled="transferStatus.startsWith('正在下载')">直接下载 (推荐)</n-tag>
-                                            <n-tag checkable :checked="saverMethod === 'blob'" @click="saverMethod='blob'" :disabled="transferStatus.startsWith('正在下载')">内存缓存 (兼容)</n-tag>
-                                        </n-space>
-                                    </n-space>
-                                </n-gi>
-
-                                <n-gi>
-                                    <input 
-                                        type="file" 
-                                        multiple 
-                                        ref="fileInputRef" 
-                                        style="display: none" 
-                                        @change="onFileInputChange" 
-                                    />
-                                    
-                                    <input 
-                                        type="file" 
-                                        webkitdirectory 
-                                        ref="folderInputRef" 
-                                        style="display: none" 
-                                        @change="onFileInputChange" 
-                                    />
-
-                                    <n-card class="drop-zone" :class="{ 'has-file': inputFiles.length > 0 }">
-                                      <n-space vertical align="center">
-                                          <n-icon size="40" color="#888">
-                                              <document-attach-outline />
-                                          </n-icon>
-                                          <div v-if="inputFiles.length === 0">
-                                              <n-space>
-                                                  <n-button dashed size="small" @click="triggerFileSelect">选择文件 (可多选)</n-button>
-                                                  <n-button dashed size="small" @click="triggerFolderSelect">选择文件夹</n-button>
-                                              </n-space>
-                                          </div>
-
-                                          <div v-else style="text-align: center;">
-                                            <div style="font-weight: bold; font-size: 1.1em;">
-                                                <span v-if="inputFiles.length === 1">{{ inputFiles[0]!.name }}</span>
-                                                <span v-else>已选择 {{ inputFiles.length }} 个文件</span>
-                                            </div>
-                                            <div style="font-size: 0.9em; color: #888">
-                                                总大小: {{ formatSize(inputFiles.reduce((a,b)=>a+b.size, 0)) }}
-                                            </div>
-                                            <n-button text type="error" size="tiny" @click="inputFiles = []" style="margin-top:5px">
-                                                清除重新选择
-                                            </n-button>
-                                        </div>
-                                    </n-space>
-                                  </n-card>
-                                </n-gi>
-
-                                <n-gi>
-                                    <n-button
-                                        type="success"
-                                        block
-                                        size="large"
-                                        :disabled="inputFiles.length === 0 || transferStatus.includes('发送中')"
-                                        @click="handleSendClick"
-                                    >
-                                    <template #icon><n-icon><cloud-upload-outline /></n-icon></template>
-                                        开始传输
-                                    </n-button>
-                                </n-gi>
-                            </n-grid>
-
-                            <div v-if="transferStatus" class="progress-area">
-                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
-                                  <n-button 
-                                      v-if="transferProgress < 100 && !transferStatus.includes('完成') && !transferStatus.includes('中断')" 
-                                      size="tiny" 
-                                      type="error" 
-                                      secondary
-                                      @click="cancelTransfer"
-                                  >
-                                      取消
-                                  </n-button>
-                              </div>
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-                                    <span>{{ transferStatus }}</span>
-                                </div>
-                                <span v-if="transferProgress > 0 && transferProgress < 100" style="font-size: 0.9em; color: #666">
-                                    <n-icon style="vertical-align: -2px"><flash-outline /></n-icon> 
-                                    {{ transferSpeed }} · 剩余 {{ timeRemaining }}
-                                </span>
-                                <n-progress
-                                    type="line"
-                                    :percentage="transferProgress"
-                                    :status="transferProgress === 100 ? 'success' : 'default'"
-                                    processing
-                                />
-                            </div>
-
-                            <div v-if="receivedFileUrl" style="margin-top: 15px; text-align: center;">
-                                <n-button tag="a" :href="receivedFileUrl" :download="receivedFileName" type="info" ghost>
-                                    <template #icon><n-icon><cloud-download-outline /></n-icon></template>
-                                    保存 {{ receivedFileName }}
-                                </n-button>
-                            </div>
+                      </div>
+                      
+                      <div v-else style="text-align: center;">
+                        <div style="font-weight: bold; font-size: 1.1em;">
+                          <span v-if="inputFiles.length === 1">{{ inputFiles[0]!.name }}</span>
+                          <span v-else>已选择 {{ inputFiles.length }} 个文件</span>
                         </div>
-                    </div>
+                        <div style="font-size: 0.9em; color: #888">
+                          总大小: {{ formatSize(inputFiles.reduce((a,b)=>a+b.size, 0)) }}
+                        </div>
+                        <n-button text type="error" size="tiny" @click="inputFiles = []" style="margin-top:5px">
+                          清除重新选择
+                        </n-button>
+                      </div>
+                    </n-space>
+                  </n-card>
+                </n-gi>
+                
+                <n-gi>
+                  <n-button
+                    type="success"
+                    block
+                    size="large"
+                    :disabled="inputFiles.length === 0 || transferStatus.includes('发送中')"
+                    @click="handleSendClick"
+                  >
+                  <template #icon><n-icon><cloud-upload-outline /></n-icon></template>
+                  开始传输
+                  </n-button>
+                </n-gi>
+              </n-grid>
+            
+              <div v-if="transferStatus" class="progress-area">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                  <n-button 
+                    v-if="transferProgress < 100 && !transferStatus.includes('完成') && !transferStatus.includes('中断')" 
+                    size="tiny" 
+                    type="error" 
+                    secondary
+                    @click="cancelTransfer"
+                  >
+                  取消
+                  </n-button>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                  <span>{{ transferStatus }}</span>
+                </div>
+                <span v-if="transferProgress > 0 && transferProgress < 100" style="font-size: 0.9em; color: #666">
+                  <n-icon style="vertical-align: -2px"><flash-outline /></n-icon> 
+                  {{ transferSpeed }} · 剩余 {{ timeRemaining }}
+                </span>
+                <n-progress
+                  type="line"
+                  :percentage="transferProgress"
+                  :status="transferProgress === 100 ? 'success' : 'default'"
+                  processing
+                />
+              </div>
+          
+              <div v-if="receivedFileUrl" style="margin-top: 15px; text-align: center;">
+                <n-button tag="a" :href="receivedFileUrl" :download="receivedFileName" type="info" ghost>
+                  <template #icon><n-icon><cloud-download-outline /></n-icon></template>
+                  保存 {{ receivedFileName }}
+                </n-button>
+              </div>
+            </div>
+          </div>
+      
+          <n-divider />
+          <n-button size="small" secondary @click="showLogModal = true">查看运行日志</n-button>
+        </n-space>
+      </n-card>
+    </div>
 
-                    <n-divider />
-                    <n-button size="small" secondary @click="showLogModal = true">查看运行日志</n-button>
-                </n-space>
-            </n-card>
-        </div>
+    <n-modal v-model:show="showLogModal" preset="card" title="系统日志" style="width: 90%; max-width: 600px">
+      <n-log :log="logs" :rows="15" style="font-family: monospace;" />
+    </n-modal>
 
-        <n-modal v-model:show="showLogModal" preset="card" title="系统日志" style="width: 90%; max-width: 600px">
-            <n-log :log="logs" :rows="15" style="font-family: monospace;" />
-        </n-modal>
+    <n-modal :show="isPendingApproval" :mask-closable="false">
+      <n-card style="width: 300px; text-align: center;" :bordered="false" size="huge">
+        <template #header>🚪 敲门中...</template>
+        <n-space vertical align="center">
+          <n-icon size="50" color="#f0a020"><refresh class="spin" /></n-icon>
+          <p>正在等待房主允许您加入...</p>
+        </n-space>
+      </n-card>
+    </n-modal>
 
-        <n-modal :show="isPendingApproval" :mask-closable="false">
-            <n-card style="width: 300px; text-align: center;" :bordered="false" size="huge">
-                <template #header>🚪 敲门中...</template>
-                <n-space vertical align="center">
-                    <n-icon size="50" color="#f0a020"><refresh class="spin" /></n-icon>
-                    <p>正在等待房主允许您加入...</p>
-                </n-space>
-            </n-card>
-        </n-modal>
-
-        <n-modal :show="!!pendingGuest" :mask-closable="false">
-            <n-card style="width: 90%; max-width: 400px" title="🔔 新连接请求" :bordered="false" size="huge">
-                <p style="font-size: 1.1em; margin-bottom: 20px;"><strong>{{ pendingGuest?.name }}</strong></p>
-                <p style="font-size: 1.1em; margin-bottom: 20px;">请求加入房间 #{{ roomId }}</p>
-                <n-grid :cols="2" x-gap="12">
-                    <n-gi><n-button block type="error" ghost @click="rejectGuest">拒绝</n-button></n-gi>
-                    <n-gi><n-button block type="success" @click="approveGuest">允许加入</n-button></n-gi>
-                </n-grid>
-            </n-card>
-        </n-modal>
+    <n-modal :show="!!pendingGuest" :mask-closable="false">
+      <n-card style="width: 90%; max-width: 400px" title="🔔 新连接请求" :bordered="false" size="huge">
+        <p style="font-size: 1.1em; margin-bottom: 20px;"><strong>{{ pendingGuest?.name }}</strong></p>
+        <p style="font-size: 1.1em; margin-bottom: 20px;">请求加入房间 #{{ roomId }}</p>
+        <n-grid :cols="2" x-gap="12">
+          <n-gi><n-button block type="error" ghost @click="rejectGuest">拒绝</n-button></n-gi>
+          <n-gi><n-button block type="success" @click="approveGuest">允许加入</n-button></n-gi>
+        </n-grid>
+      </n-card>
+    </n-modal>
 
     </n-message-provider>
   </n-config-provider>
