@@ -1,5 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
-import { Server, Connection, ConnectionContext, WSMessage, routePartykitRequest, getServerByName } from "partyserver";
+import { Server, Connection, ConnectionContext, WSMessage, getServerByName } from "partyserver";
 import { UAParser } from 'ua-parser-js';
 import jwt from "@tsndr/cloudflare-worker-jwt"
 
