@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Server, Connection, ConnectionContext, WSMessage } from "partyserver";
+import { Server, Connection, ConnectionContext, WSMessage, routePartykitRequest } from "partyserver";
 import { UAParser } from 'ua-parser-js';
 import jwt from "@tsndr/cloudflare-worker-jwt"
 
@@ -21,7 +21,7 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 		
-		if (url.pathname === "/api/room") {
+		if (url.pathname.startsWith("/parties/main/")) {
 			const upgradeHeader = request.headers.get("Upgrade");
 			if (!upgradeHeader || upgradeHeader !== "websocket") {
 				return new Response("Expected Upgrade: websocket", { status: 426 });
@@ -80,14 +80,13 @@ export default {
 
 			// 将请求转交给 Durable Object
 			let dummyRequest = request;
+			const dummyHeaders = request.headers;
 			if (jwtoken) {
+				dummyHeaders.append("session-token", jwtoken);
+				dummyHeaders.append("rtc-config", rtcConfig)
 				dummyRequest = new Request(url, {
-					headers: {
-						"User-Agent": request.headers.get('User-Agent')??'',
-						"session-token": jwtoken,
-						"rtc-config": rtcConfig,
-						"Upgrade": 'websocket'
-					}
+					method: 'GET',
+					headers: dummyHeaders
 				})
 			}
 			return stub.fetch(dummyRequest);

@@ -281,14 +281,12 @@ export function useRoomConnection() {
     if (authData.useTURN) queryObj.turn = 'true';
     if (id) queryObj.id = id;
 
-    if (socket) socket.close();
-
     socket = new PartySocket({
         host: WORKER_HOST,
-        path: '/api/room',
         room: id,
         query: queryObj,
         maxRetries: MAX_RECONNECT_ATTEMPTS,
+        protocol: 'wss'
     });
     
     socket.onopen = () => {

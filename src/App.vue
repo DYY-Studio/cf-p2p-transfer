@@ -127,6 +127,7 @@ const handleJoinRoom = async () => {
     notify('info', '正在连接服务器...');
   } catch (e) {
     notify('error', '连接失败');
+    log(`连接失败 ${e}`);
   }
 };
 
