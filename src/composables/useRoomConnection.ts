@@ -254,31 +254,18 @@ export function useRoomConnection() {
       socket.onclose = null;
       socket.close();
     }
-
-    let queryParams = `id=${id}`;
-
-    if (isRetry && sessionTicket.value) {
-        queryParams += `&ticket=${encodeURIComponent(sessionTicket.value)}`;
-        log('正在使用 Session Ticket 尝试重连...');
-    } else if (token) {
-        queryParams += `&token=${encodeURIComponent(token)}`;
-        if (useTURN) {
-          queryParams += `&turn=true`;
-        }
-    } else {
-        log('缺少验证凭据，无法连接');
-        return;
-    }
     
     const queryObj: Record<string, string> = {};
-    if (authData.token) {
-      if (authData.isRetry) {
-        queryObj.token = authData.token;
-      } else {
-        queryObj.ticket = authData.token;
-      }
+    if (isRetry && sessionTicket.value) {
+      queryObj.ticket = sessionTicket.value;
+      log('正在使用 Session Ticket 尝试重连...');
+    } else if (token) {
+      queryObj.token = token;
+    } else {
+      log('缺少验证凭据，无法连接');
+      return;
     }
-    if (authData.useTURN) queryObj.turn = 'true';
+    if (useTURN) queryObj.turn = 'true';
     if (id) queryObj.id = id;
 
     socket = new PartySocket({

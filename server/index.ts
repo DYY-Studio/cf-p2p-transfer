@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { Server, Connection, ConnectionContext, WSMessage, routePartykitRequest } from "partyserver";
+import { Server, Connection, ConnectionContext, WSMessage, routePartykitRequest, getServerByName } from "partyserver";
 import { UAParser } from 'ua-parser-js';
 import jwt from "@tsndr/cloudflare-worker-jwt"
 
 export interface Env {
-	SIGNALING_DO: DurableObjectNamespace;
+	SIGNALING_DO: DurableObjectNamespace<Server>;
 	TURN_KEY_ID: string;
 	TURN_KEY_API_TOKEN: string;
 	TURNSTILE_SECRET_KEY: string;
@@ -74,21 +74,17 @@ export default {
 				}
 			}
 			
-			// 获取 Durable Object ID
-			const id = env.SIGNALING_DO.idFromName(roomId);
-			const stub = env.SIGNALING_DO.get(id);
-
 			// 将请求转交给 Durable Object
-			let dummyRequest = request;
-			const dummyHeaders = request.headers;
+			const dummyHeaders = Object.fromEntries(request.headers);
 			if (jwtoken) {
-				dummyHeaders.append("session-token", jwtoken);
-				dummyHeaders.append("rtc-config", rtcConfig)
-				dummyRequest = new Request(url, {
-					method: 'GET',
-					headers: dummyHeaders
-				})
+				dummyHeaders["session-token"] = jwtoken;
+				dummyHeaders["rtc-config"] = rtcConfig;
 			}
+			const dummyRequest = new Request(url, {
+				method: 'GET',
+				headers: dummyHeaders,
+			})
+			const stub = await getServerByName(env.SIGNALING_DO, roomId);
 			return stub.fetch(dummyRequest);
 		}
 
@@ -256,14 +252,6 @@ export class SignalingDurableObject extends Server<Env> {
 			const activeConns = [...this.getConnections()];
 			if (activeConns.length === 0) {
 				await this.ctx.storage.deleteAll();
-			}
-		}
-	}
-
-	broadcast(message: string, excludeIds: string[] = []) {
-		for (const conn of this.getConnections()) {
-			if (!excludeIds.includes(conn.id) && this.approvedIds.has(conn.id)) {
-				conn.send(message);
 			}
 		}
 	}
