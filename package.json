@@ -19,6 +19,8 @@
 		"@tsndr/cloudflare-worker-jwt": "^3.2.1",
 		"client-zip": "^2.5.0",
 		"naive-ui": "^2.43.2",
+		"partyserver": "^0.1.0",
+		"partysocket": "^1.1.10",
 		"streamsaver": "^2.0.6",
 		"ua-parser-js": "^2.0.7",
 		"vfonts": "^0.0.3",

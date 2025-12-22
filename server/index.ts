@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { Server, Connection, ConnectionContext, WSMessage } from "partyserver";
 import { UAParser } from 'ua-parser-js';
 import jwt from "@tsndr/cloudflare-worker-jwt"
 
@@ -149,170 +150,134 @@ type SignalMessage = {
   [key: string]: any;
 };
 
-export class SignalingDurableObject extends DurableObject {
-	sessions: WebSocket[] = [];
-	hostSession: WebSocket | null = null;
-	approvedSessions: Set<WebSocket> = new Set();
+export class SignalingDurableObject extends Server<Env> {
+	hostConnectionId: string | null = null;
+	approvedIds: Set<string> = new Set();
 
 	uaParser: UAParser = new UAParser();
 
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
-	}
+	async onConnect(connection: Connection, ctx: ConnectionContext): Promise<void> {
+		const request = ctx.request;
 
-	async fetch(request: Request): Promise<Response> {
-		let currentAlarm = await this.ctx.storage.getAlarm();
-		if (currentAlarm !== null) {
-			await this.ctx.storage.deleteAlarm();
-		}
-
-		// 创建 WebSocket
-		const [client, server] = Object.values(new WebSocketPair());
-
-		await this.handleSession(server, request);
-
-		return new Response(null, {
-			status: 101,
-			webSocket: client,
-		});
-	}
-
-	async handleSession(webSocket: WebSocket, request: Request) {
-		// 接受连接
-		webSocket.accept();
-		this.sessions.push(webSocket);
-
-		const isHost = this.hostSession === null || (this.hostSession && webSocket === this.hostSession);
+		const isHost = this.hostConnectionId === null;
 		if (isHost) {
-			this.hostSession = webSocket;
-			this.approvedSessions.add(webSocket);
+			this.hostConnectionId = connection.id;
+			this.approvedIds.add(connection.id);
 			const currAlarm = await this.ctx.storage.getAlarm();
-			if (currAlarm) { 
-				await this.ctx.storage.deleteAlarm();
-			}
+			if (currAlarm) await this.ctx.storage.deleteAlarm();
 		}
 
-		webSocket.send(JSON.stringify({ 
+		connection.send(JSON.stringify({ 
 			type: 'role', 
 			role: isHost ? 'host' : 'guest' 
 		}));
 
 		if (request.headers.has('session-token')) {
-			webSocket.send(JSON.stringify({
+			connection.send(JSON.stringify({
 				type: 'session_token',
 				content: request.headers.get('session-token')
-			}))
+			}));
 		}
 
 		if (request.headers.get('rtc-config')) {
-			webSocket.send(JSON.stringify({
+			connection.send(JSON.stringify({
 				type: 'rtc_config',
 				data: request.headers.get('rtc-config') 
-			}))
+			}));
 		}
 
 		const ua = request.headers.get('User-Agent') || 'unknown';
-		this.uaParser.setUA(ua)
+		this.uaParser.setUA(ua);
 
 		const parseResult = this.uaParser.getResult();
-		const deviceName = `${parseResult.device.type??'unknown device'} (${parseResult.os.name??'unknown os'}, ${parseResult.browser.name??'unknown browser'})`;
+		(connection as any).deviceName = `${parseResult.device.type??'unknown device'} (${parseResult.os.name??'unknown os'}, ${parseResult.browser.name??'unknown browser'})`;
+	}
 
-		// 监听消息
-		webSocket.addEventListener("message", async (event) => {
-			try {
-				const msg = JSON.parse(event.data as string) as SignalMessage;
-				if (msg.type === 'join_request') {
-					// 只有 Host 存在时才能申请
-					if (this.hostSession && this.hostSession.readyState === WebSocket.READY_STATE_OPEN) {
-						this.hostSession.send(JSON.stringify({
-							type: 'join_request',
-							deviceName: deviceName, // 是谁在敲门~
-							guestId: this.sessions.indexOf(webSocket)
-						}));
-					} else {
-						// 房主不在，直接拒绝或提示
-						webSocket.send(JSON.stringify({ type: 'error', message: 'Host not active' }));
-					}
-					return;
-				}
-
-				if (msg.type === 'join_approve') {
-					if (webSocket !== this.hostSession) return; // 只有房主能审批
-
-					// 找到对应的 Guest
-					const guestIndex = msg.guestId;
-					const guestWs = this.sessions[guestIndex];
-
-					if (guestWs) {
-						this.approvedSessions.add(guestWs); // 加入白名单
-						guestWs.send(JSON.stringify({ type: 'join_approve' }));
-					}
-					return;
-				}
-
-				if (msg.type === 'join_reject') {
-					if (webSocket !== this.hostSession) return;
-					const guestWs = this.sessions[msg.guestId];
-					if (guestWs) {
-						guestWs.send(JSON.stringify({ type: 'join_reject' }));
-						guestWs.close(); // 拒绝后直接断开
-					}
-					return;
-				}
-
-				if (msg.type === 'ping') {
-					webSocket.send(JSON.stringify({type: 'pong'}));
-					return;
-				}
-
-				if (this.approvedSessions.has(webSocket)) {
-					this.broadcast(event.data as string, webSocket);
+	async onMessage(connection: Connection, message: WSMessage): Promise<void> {
+		try {
+			message = message as string;
+			const msg = JSON.parse(message) as SignalMessage;
+			if (msg.type === 'join_request') {
+				const hostConn = this.getHostConnection();
+				if (hostConn && hostConn.readyState === WebSocket.READY_STATE_OPEN) {
+					hostConn.send(JSON.stringify({
+						type: 'join_request',
+						deviceName: (connection as any).deviceName, // 是谁在敲门~
+						guestId: connection.id
+					}));
 				} else {
-					// 如果不在白名单却发 offer，说明是恶意连接或 Bug，忽略掉它
-					console.warn("Blocked unauthorized signal from guest");
+					// 房主不在，直接拒绝或提示
+					connection.send(JSON.stringify({ type: 'error', message: 'Host not active' }));
 				}
-			} catch (err) {
-				console.error("Broadcast error", err);
+				return;
 			}
-		});
 
-		// 监听关闭
-		webSocket.addEventListener("close", async () => {
-			await this.userLeft(webSocket);
-		});
+			if (msg.type === 'join_approve') {
+				if (connection.id !== this.hostConnectionId) return; // 只有房主能审批
 
-		webSocket.addEventListener("error", async () => {
-			await this.userLeft(webSocket);
-		});
-	}
+				// 找到对应的 Guest
+				const guestId = msg.guestId;
+				const guestCoonn = this.getConnection(guestId);
 
-	broadcast(message: string, sender: WebSocket) {
-		this.sessions.forEach(session => {
-			if (session !== sender && 
-				session.readyState === WebSocket.READY_STATE_OPEN &&
-				this.approvedSessions.has(session) 
-			) {
-				session.send(message);
+				if (guestCoonn) {
+					this.approvedIds.add(guestId); // 加入白名单
+					guestCoonn.send(JSON.stringify({ type: 'join_approve' }));
+				}
+				return;
 			}
-		});
+
+			if (msg.type === 'join_reject') {
+				if (connection.id !== this.hostConnectionId) return;
+				const guestConn = this.getConnection(msg.guestId);
+				if (guestConn) {
+					guestConn.send(JSON.stringify({ type: 'join_reject' }));
+					guestConn.close(); // 拒绝后直接断开
+				}
+				return;
+			}
+
+			if (this.approvedIds.has(connection.id)) {
+				this.broadcast(message, [connection.id]);
+			} else {
+				console.warn("Blocked unauthorized signal from guest");
+			}
+		} catch (err) {
+			console.error("Broadcast error", err);
+		}
 	}
 
-	async alarm() {
-		this.hostSession = null;
-		this.sessions.forEach(s => s.close(1000, "Host left"));
-		await this.ctx.storage.deleteAll();
-	}
-
-	async userLeft(ws: WebSocket) {
-		this.sessions = this.sessions.filter(s => s !== ws);
-		this.approvedSessions.delete(ws);
+	async onClose(connection: Connection, code: number, reason: string, wasClean: boolean): Promise<void> {
+		this.approvedIds.delete(connection.id);
 		
 		// 如果房主走了（可能是掉线——）先等待10秒，还没恢复就给清理掉
 		// 这时全走了就直接清理
-		if (ws === this.hostSession) {
-			await this.ctx.storage.setAlarm(Date.now() + 10);
-		} else if (this.sessions.length == 0) {
-			await this.alarm();
+		if (connection.id === this.hostConnectionId) {
+			await this.ctx.storage.setAlarm(Date.now() + 10 * 1000);
+		} else {
+			const activeConns = [...this.getConnections()];
+			if (activeConns.length === 0) {
+				await this.ctx.storage.deleteAll();
+			}
 		}
+	}
+
+	broadcast(message: string, excludeIds: string[] = []) {
+		for (const conn of this.getConnections()) {
+			if (!excludeIds.includes(conn.id) && this.approvedIds.has(conn.id)) {
+				conn.send(message);
+			}
+		}
+	}
+
+	getHostConnection() {
+		return this.hostConnectionId ? this.getConnection(this.hostConnectionId) : null;
+	}
+
+	async alarm() {
+		this.hostConnectionId = null;
+		for (const conn of this.getConnections()) {
+			conn.close(1000, "Host left");
+		}
+		await this.ctx.storage.deleteAll();
 	}
 }

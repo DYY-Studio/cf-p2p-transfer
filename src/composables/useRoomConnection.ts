@@ -1,5 +1,6 @@
 import { ref, onUnmounted } from 'vue';
 import { encryptMsg, decryptMsg } from '@/utils/crypto';
+import PartySocket from 'partysocket';
 
 const WORKER_HOST = import.meta.env.VITE_WORKER_HOST;
 
@@ -23,15 +24,9 @@ export function useRoomConnection() {
   const pendingGuest = ref<{ name: string; id: number } | null>(null);
   
   // --- 内部变量 (非响应式) ---
-  let socket: WebSocket | null = null;
+  let socket: PartySocket | null = null;
   let peerConnection: RTCPeerConnection | null = null;
   let dataChannel: RTCDataChannel | null = null;
-  
-  // -- 网络稳定性增强 ---
-  let heartbeatTimer: any = null;
-  let reconnectTimer: any = null;
-  let reconnectAttempts = 0;
-  let isManualClose = false;
   
   // --- 外部回调 ---
   let onChannelOpened: ((channel: RTCDataChannel) => void) | null = null;
@@ -50,21 +45,6 @@ export function useRoomConnection() {
   // --- 辅助函数 ---
   const log = (msg: string) => {
     logs.value += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
-  };
-  
-  // --- 网络稳定性函数 ---
-  const startHeartbeat = () => {
-    stopHeartbeat();
-    heartbeatTimer = setInterval(() => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, HEARTBEAT_INTERVAL);
-  };
-  
-  const stopHeartbeat = () => {
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
   };
   
   // --- 核心 WebRTC 逻辑 ---
@@ -265,14 +245,10 @@ export function useRoomConnection() {
     if ((isJoining.value || isConnected.value) && !isRetry) return;
     
     if (!isRetry) {
-      isManualClose = false;
-      reconnectAttempts = 0;
       roomId.value = id;
     }
     
     isJoining.value = true;
-    
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     
     if (socket) {
       socket.onclose = null;
@@ -294,13 +270,30 @@ export function useRoomConnection() {
         return;
     }
     
-    socket = new WebSocket(`${wsProtocol}//${WORKER_HOST}/api/room?${queryParams}`);
+    const queryObj: Record<string, string> = {};
+    if (authData.token) {
+      if (authData.isRetry) {
+        queryObj.token = authData.token;
+      } else {
+        queryObj.ticket = authData.token;
+      }
+    }
+    if (authData.useTURN) queryObj.turn = 'true';
+    if (id) queryObj.id = id;
+
+    if (socket) socket.close();
+
+    socket = new PartySocket({
+        host: WORKER_HOST,
+        path: '/api/room',
+        room: id,
+        query: queryObj,
+        maxRetries: MAX_RECONNECT_ATTEMPTS,
+    });
     
     socket.onopen = () => {
       isConnected.value = true;
       isJoining.value = false;
-      reconnectAttempts = 0;
-      startHeartbeat();
       log('WebSocket 已连接，等待信令...');
       
       if (!peerConnection) setupPeerConnection();
@@ -314,30 +307,7 @@ export function useRoomConnection() {
       isConnected.value = false;
       p2pStatus.value = 'disconnected';
       log('WebSocket 断开');
-      
-      if (!isManualClose) {
-        attemptReconnect();
-      } else {
-        p2pStatus.value = 'disconnected';
-      }
     };
-  };
-  
-  const attemptReconnect = () => {
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      log('达到最大重连次数，停止重连');
-      return;
-    }
-    
-    reconnectAttempts++;
-    
-    const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-    log(`连接断开，${delay / 1000} 秒后尝试第 ${reconnectAttempts} 次重连...`);
-    
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => {
-      connectSocket(roomId.value, {isRetry: true});
-    }, delay);
   };
   
   const startCall = async () => {
@@ -352,9 +322,6 @@ export function useRoomConnection() {
   };
   
   const leaveRoom = () => {
-    isManualClose = true;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    stopHeartbeat();
     socket?.close();
     peerConnection?.close();
     isConnected.value = false;
