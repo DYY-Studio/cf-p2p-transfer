@@ -127,6 +127,7 @@ npm run build
 5. **房主审核**：
    * 访客端显示“敲门中...”。
    * 房主端会弹出请求提示，点击“允许加入”。
+   * 如果访客输错密码，房主不会收到任何提示，访客必须刷新页面重新加入
 
 
 6. **传输文件**：
@@ -163,13 +164,14 @@ npm run build
 * TypeScript
 * Naive UI (组件库)
 * WebRTC (RTCPeerConnection, RTCDataChannel)
+* PartySocket ([cloudflare/partykit](https://github.com/cloudflare/partykit))
 * StreamSaver.js (文件流式保存)
 * Vue Turnstile (封装Cloudflare Turnstile)
 
 **Backend (Cloudflare Workers)**
 
 * Workers
-* Durable Objects (WebSocket 房间状态管理)
+* PartyServer / Durable Objects ([cloudflare/partykit](https://github.com/cloudflare/partykit))
 * Realtime / TURN API
 * Turnstile
 * UAParser.js (为房主提供访客的基础信息)
