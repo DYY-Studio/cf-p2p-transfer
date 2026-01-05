@@ -16,7 +16,7 @@ export function useFileTransfer(log: (msg: string) => void) {
   const saverMethod = ref<'StreamSaver' | 'blob'>('StreamSaver');
   const transferSpeed = ref('0 B/s');
   const timeRemaining = ref('calculating...');
-  
+
   // --- 内部变量 ---
   let fileWriter: WritableStreamDefaultWriter | null = null;
   let receivingMeta: { name: string; size: number; type: string } | null = null;
@@ -26,41 +26,41 @@ export function useFileTransfer(log: (msg: string) => void) {
   let speedInterval: any = null;
   let lastBytes = 0;
   let abortController: AbortController | null = null;
-  
+
   const calculateTotalSize = (files: File[]) => files.reduce((acc, f) => acc + f.size, 0);
-  
+
   const stopLocalTransfer = (reason: string) => {
     log(`传输中断: ${reason}`);
-    
+
     if (abortController) {
       abortController.abort();
       abortController = null;
     }
-    
+
     if (fileWriter) {
-      fileWriter.abort(reason).catch(() => {});
+      fileWriter.abort(reason).catch(() => { });
       fileWriter = null;
     }
-    
+
     if (receivedChunks.length > 0) {
       receivedChunks = [];
     }
-    
+
     stopSpeedTracker();
   };
-  
-  // --- 核心逻辑：绑定通道 ---
+
+  // --- 绑定通道 ---
   const setupTransferChannel = (channel: RTCDataChannel) => {
     activeDataChannel = channel;
     channel.binaryType = 'arraybuffer'; // 确保接收二进制流
-    
+
     // 根据当前模式绑定不同的处理函数
     channel.onmessage = (event) => {
       const data = event.data;
-      
+
       if (typeof data === 'string') {
         const msg = JSON.parse(data);
-        
+
         if (msg.type === 'cancel-transfer') {
           log('对方已取消传输');
           transferStatus.value = '对方已取消';
@@ -68,19 +68,19 @@ export function useFileTransfer(log: (msg: string) => void) {
           return;
         }
       }
-      
+
       if (saverMethod.value === 'blob') {
         handleDataMessageBlob(event);
       } else {
         handleDataMessageStream(event);
       }
     };
-    
+
     channel.onclose = () => {
       stopLocalTransfer('Channel closed');
     };
   };
-  
+
   const startSpeedTracker = (total: number) => {
     stopSpeedTracker(); // 防止重复开启
     processedBytes = 0;
@@ -88,16 +88,16 @@ export function useFileTransfer(log: (msg: string) => void) {
     let totalBytes = total;
     transferSpeed.value = '0 B/s';
     timeRemaining.value = '--';
-    
+
     speedInterval = setInterval(() => {
       const currentBytes = processedBytes;
       const diff = currentBytes - lastBytes;
-      const speedBytesPerSec = diff; // 因为我们每1秒执行一次，所以差值就是 B/s
-      
-      // 1. 更新速度显示
+      const speedBytesPerSec = diff;
+
+      // 更新速度显示
       transferSpeed.value = formatSize(speedBytesPerSec) + '/s';
-      
-      // 2. 更新剩余时间显示
+
+      // 更新剩余时间显示
       if (speedBytesPerSec > 0) {
         const remaining = totalBytes - currentBytes;
         const seconds = Math.ceil(remaining / speedBytesPerSec);
@@ -105,56 +105,56 @@ export function useFileTransfer(log: (msg: string) => void) {
       } else {
         timeRemaining.value = '--';
       }
-      
+
       lastBytes = currentBytes;
     }, 1000); // 每秒刷新一次
   };
-  
+
   const stopSpeedTracker = () => {
     if (speedInterval) clearInterval(speedInterval);
     speedInterval = null;
     transferSpeed.value = ''; // 传输结束清空
     timeRemaining.value = '';
   };
-  
-  // --- 逻辑 A：发送端 (带背压控制) ---
+
+  // --- 发送端 (带背压控制) ---
   const sendFiles = async (files: File[]) => {
     if (!activeDataChannel || activeDataChannel.readyState !== 'open') {
       throw new Error("P2P 通道未就绪");
     }
-    
+
     if (files.length === 0) return;
     if (!files[0]) return;
-    
+
     const isSingle = files.length === 1;
     const totalSize = calculateTotalSize(files);
-    
+
     const metaName = isSingle ? files[0].name : 'archive.zip';
     const metaType = isSingle ? files[0].type : 'application/zip';
-    
+
     transferProgress.value = 0;
     transferStatus.value = `准备发送: ${metaName}`;
     log(`⬆️ 开始发送: ${metaName} (${files.length} 个文件)`);
-    
+
     startSpeedTracker(totalSize);
-    
+
     abortController = new AbortController();
     const signal = abortController.signal;
-    
+
     let reader: ReadableStreamDefaultReader | null = null;
-    
+
     try {
-      // 1. 发送元数据
+      // 发送元数据
       activeDataChannel.send(JSON.stringify({
-        type: 'meta', 
-        name: metaName, 
-        size: totalSize, 
+        type: 'meta',
+        name: metaName,
+        size: totalSize,
         mime: metaType,
         zipped: !isSingle
       }));
-      
+
       let readableStream: ReadableStream<Uint8Array>;
-      
+
       if (isSingle) {
         readableStream = files[0].stream();
       } else {
@@ -165,55 +165,55 @@ export function useFileTransfer(log: (msg: string) => void) {
         }));
         readableStream = downloadZip(filesForZip).body!;
       }
-      
-      // 2. 分片发送循环
+
+      // 分片发送循环
       reader = readableStream.getReader();
       while (true) {
         if (signal.aborted) {
           throw new Error("User aborted or Connection lost");
         }
-        
+
         if (activeDataChannel.readyState !== 'open') {
           throw new Error("Channel closed unexpectedly");
         }
-        
+
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         let chunkOffset = 0;
-        
+
         while (chunkOffset < value.byteLength) {
-          
+
           if (signal.aborted || activeDataChannel.readyState !== 'open') {
             throw new Error("Transfer aborted");
           }
-          
+
           // 背压控制：如果缓冲区满了，暂停发送，防止浏览器崩溃
           while (activeDataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
             if (activeDataChannel.readyState !== 'open') throw new Error("Channel closed during backpressure");
             await new Promise(resolve => setTimeout(resolve, 10));
           }
-          
+
           const end = Math.min(chunkOffset + CHUNK_SIZE, value.byteLength);
           const chunk = value.subarray(chunkOffset, end);
-          
+
           activeDataChannel.send(chunk as Uint8Array<ArrayBuffer>);
-          
+
           const chunkSize = chunk.byteLength;
           chunkOffset += chunkSize;
           processedBytes += chunkSize;
-          
+
           transferProgress.value = Math.min(100, Math.floor((processedBytes / totalSize) * 100));
           transferStatus.value = "发送中...";
         }
       }
-      
-      // 3. 确保最后的数据发完
+
+      // 确保最后的数据发完
       while (activeDataChannel.bufferedAmount > 0) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       activeDataChannel.send(JSON.stringify({ type: 'eof' }));
-      
+
       transferStatus.value = '发送完成';
       log('⬆️ 发送完毕');
     } catch (e) {
@@ -230,8 +230,8 @@ export function useFileTransfer(log: (msg: string) => void) {
       abortController = null;
     }
   };
-  
-  // --- 逻辑 B：接收端 (StreamSaver) ---
+
+  // --- 接收端 (StreamSaver) ---
   const handleDataMessageStream = async (event: MessageEvent) => {
     const data = event.data;
     if (typeof data === 'string') {
@@ -241,9 +241,9 @@ export function useFileTransfer(log: (msg: string) => void) {
         receivingMeta = msg;
         processedBytes = 0;
         transferStatus.value = `正在下载: ${msg.name}`;
-        
+
         startSpeedTracker(msg.size);
-        
+
         const fileStream = streamSaver.createWriteStream(msg.name, { size: msg.size });
         fileWriter = fileStream.getWriter();
       } else if (msg.type === 'eof') {
@@ -259,8 +259,8 @@ export function useFileTransfer(log: (msg: string) => void) {
       transferProgress.value = Math.min(100, Math.floor((processedBytes / receivingMeta.size) * 100));
     }
   };
-  
-  // --- 逻辑 C：接收端 (Blob/Memory) ---
+
+  // --- 接收端 (Blob/Memory) ---
   const handleDataMessageBlob = (event: MessageEvent) => {
     const data = event.data;
     if (typeof data === 'string') {
@@ -271,7 +271,7 @@ export function useFileTransfer(log: (msg: string) => void) {
         receivedChunks = [];
         processedBytes = 0;
         startSpeedTracker(msg.size);
-        
+
         receivedFileUrl.value = null;
         transferStatus.value = `正在缓存: ${msg.name}`;
       } else if (msg.type === 'eof' && receivingMeta) {
@@ -279,7 +279,7 @@ export function useFileTransfer(log: (msg: string) => void) {
         receivedFileUrl.value = URL.createObjectURL(fileBlob);
         receivedFileName.value = receivingMeta.name;
         transferStatus.value = '接收完成';
-        
+
         stopSpeedTracker();
         receivedChunks = [];
         receivingMeta = null;
@@ -290,18 +290,18 @@ export function useFileTransfer(log: (msg: string) => void) {
       transferProgress.value = Math.min(100, Math.floor((processedBytes / receivingMeta.size) * 100));
     }
   };
-  
+
   const cancelTransfer = () => {
     if (activeDataChannel && activeDataChannel.readyState === 'open') {
       try {
         activeDataChannel.send(JSON.stringify({ type: 'cancel-transfer' }));
-      } catch (e) {}
+      } catch (e) { }
     }
-    
+
     if (abortController) {
       abortController.abort();
     }
-    
+
     if (fileWriter) {
       fileWriter.abort("User cancelled");
       fileWriter = null;
@@ -310,7 +310,7 @@ export function useFileTransfer(log: (msg: string) => void) {
 
     log('我方手动取消传输');
   };
-  
+
   return {
     transferProgress, transferStatus,
     receivedFileUrl, receivedFileName,

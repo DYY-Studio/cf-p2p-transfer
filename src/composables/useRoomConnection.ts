@@ -4,9 +4,7 @@ import PartySocket from 'partysocket';
 
 const WORKER_HOST = import.meta.env.VITE_WORKER_HOST;
 
-const HEARTBEAT_INTERVAL = 30000; // 心跳包间隔
 const MAX_RECONNECT_ATTEMPTS = 5; // 最大重连次数
-const BASE_RECONNECT_DELAY = 1000; // 初始重连延迟
 
 export function useRoomConnection() {
   // --- 状态定义 ---
@@ -71,7 +69,7 @@ export function useRoomConnection() {
     socket.send(JSON.stringify(envelope));
   };
   
-  // 1. 初始化 PeerConnection
+  // 初始化 PeerConnection
   const setupPeerConnection = () => {
     if (peerConnection) {
       if (!['failed', 'closed'].includes(peerConnection.connectionState)) {
@@ -127,7 +125,7 @@ export function useRoomConnection() {
     }
   };
   
-  // 2. 处理信令消息 (Offer/Answer/Candidate)
+  // 处理信令消息 (Offer/Answer/Candidate)
   const handleSignalingMessage = async (msg: any) => {
     if (!peerConnection) return;
     
@@ -182,7 +180,7 @@ export function useRoomConnection() {
       }
     };
   };
-  // 4. WebSocket 消息路由
+  // WebSocket 消息路由
   const handleSocketMessage = async (rawMsg: any) => {
     if (rawMsg.type === 'pong') return;
 
